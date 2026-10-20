@@ -22,6 +22,8 @@ pub enum PersistentKey {
     Balance(Address),
     /// Maps delegator → delegate (who holds their voting power).
     Delegation(Address),
+    /// Maps a delegate → the addresses delegating voting power to them.
+    Delegators(Address),
 }
 
 #[soroban_sdk::contracttype]
@@ -199,6 +201,45 @@ impl TokenStorage {
         env.storage()
             .persistent()
             .remove(&PersistentKey::Delegation(owner.clone()));
+    }
+
+    pub fn delegators(env: &Env, delegate: &Address) -> soroban_sdk::Vec<Address> {
+        let key = PersistentKey::Delegators(delegate.clone());
+        if let Some(delegators) = env.storage().persistent().get(&key) {
+            Self::bump_persistent_ttl(env, &key);
+            delegators
+        } else {
+            soroban_sdk::Vec::new(env)
+        }
+    }
+
+    pub fn add_delegator(env: &Env, delegate: &Address, owner: &Address) {
+        let key = PersistentKey::Delegators(delegate.clone());
+        let mut delegators = Self::delegators(env, delegate);
+        if !delegators.contains(owner) {
+            delegators.push_back(owner.clone());
+        }
+        env.storage().persistent().set(&key, &delegators);
+        Self::bump_persistent_ttl(env, &key);
+    }
+
+    pub fn remove_delegator(env: &Env, delegate: &Address, owner: &Address) {
+        let key = PersistentKey::Delegators(delegate.clone());
+        let mut delegators = Self::delegators(env, delegate);
+        let mut index = 0;
+        while index < delegators.len() {
+            if delegators.get(index) == Some(owner.clone()) {
+                delegators.remove(index);
+                break;
+            }
+            index += 1;
+        }
+        if delegators.is_empty() {
+            env.storage().persistent().remove(&key);
+        } else {
+            env.storage().persistent().set(&key, &delegators);
+            Self::bump_persistent_ttl(env, &key);
+        }
     }
 
     /// Returns the total voting weight for `voter`: own balance + sum of all delegators' balances.

@@ -218,8 +218,9 @@ impl GovernanceStorage {
             .persistent()
             .get(&key)
             .unwrap_or(false);
-        // bump TTL on read
-        Self::bump_persistent_ttl(env, &key);
+        if env.storage().persistent().has(&key) {
+            Self::bump_persistent_ttl(env, &key);
+        }
         v
     }
     pub fn set_has_voted(env: &Env, proposal_id: u64, voter: &Address, v: bool) {

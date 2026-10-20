@@ -320,6 +320,7 @@ impl TokenContract {
         }
 
         TokenStorage::set_delegation(&env, &owner, &delegate_to);
+        TokenStorage::add_delegator(&env, &delegate_to, &owner);
         TokenEvents::delegated(&env, &owner, &delegate_to);
         Ok(())
     }
@@ -330,6 +331,8 @@ impl TokenContract {
         if TokenStorage::delegation(&env, &owner).is_none() {
             return Err(ContractError::NotDelegating);
         }
+        let delegate = TokenStorage::delegation(&env, &owner).unwrap();
+        TokenStorage::remove_delegator(&env, &delegate, &owner);
         TokenStorage::remove_delegation(&env, &owner);
         TokenEvents::undelegated(&env, &owner);
         Ok(())
@@ -340,12 +343,15 @@ impl TokenContract {
         TokenStorage::delegation(&env, &owner)
     }
 
+    /// Returns the addresses that currently delegate voting power to `delegate`.
+    pub fn get_delegators(env: Env, delegate: Address) -> soroban_sdk::Vec<Address> {
+        TokenStorage::delegators(&env, &delegate)
+    }
+
     /// Returns the voting weight for `voter`: their own balance plus the balances
     /// of all `delegators` who have delegated to them.
     ///
-    /// Governance calls this with the list of delegators it tracks off-chain.
-    /// For on-chain use, governance accumulates delegated weight by checking each
-    /// potential delegator's stored delegation target.
+    /// Governance calls this with the list returned by `get_delegators`.
     pub fn get_delegated_weight(env: Env, voter: Address, delegators: soroban_sdk::Vec<Address>) -> i128 {
         let mut weight = TokenStorage::balance(&env, &voter);
         for delegator in delegators.iter() {

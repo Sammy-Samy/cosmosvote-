@@ -32,7 +32,9 @@ use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Vec};
 
 use events::GovernanceEvents;
 use storage::GovernanceStorage;
-use types::{ContractError, ContractState, GovernanceConfig, Proposal, ProposalState, TreasuryAction, Vote, VoteRecord};
+use types::{ContractError, ContractState, GovernanceConfig, Proposal, ProposalState, TreasuryAction, VoteRecord};
+
+pub use types::Vote;
 
 // ---------------------------------------------------------------------------
 // Token interface (cross-contract call)
@@ -47,6 +49,7 @@ mod token_interface {
         fn balance_at(env: Env, owner: Address, ledger: u64) -> i128;
         fn total_supply(env: Env) -> i128;
         fn get_delegation(env: Env, owner: Address) -> Option<Address>;
+        fn get_delegators(env: Env, delegate: Address) -> Vec<Address>;
         fn get_delegated_weight(env: Env, voter: Address, delegators: Vec<Address>) -> i128;
     }
 }
@@ -427,13 +430,9 @@ impl GovernanceContract {
             return Err(ContractError::NoVotingPower);
         }
 
-        // Use the stored proposal snapshot ledger to read historical balances.
-        // Record the voter's snapshot balance as their voting weight. Delegated
-        // weight is not enumerated on-chain; off-chain tooling should provide
-        // delegator lists if needed. Using `balance_at` prevents manipulation
-        // of balances after proposal creation from affecting the tally.
-        let snapshot_ledger = proposal.snapshot_ledger as u64;
-        let weight = token_client.balance_at(&voter, &snapshot_ledger);
+        // Include the balances of accounts that delegated to this voter.
+        let delegators = token_client.get_delegators(&voter);
+        let weight = token_client.get_delegated_weight(&voter, &delegators);
         if weight <= 0 {
             return Err(ContractError::NoVotingPower);
         }
