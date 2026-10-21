@@ -10,6 +10,10 @@ authors = ["mercyJJ <joymercy7879@gmail.com>"]
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[[test]]
+name = "delegation_vote_weight_tests"
+path = "../../tests/delegation_vote_weight_tests.rs"
+
 [dependencies]
 soroban-sdk = { version = "26.1.0" }
 
