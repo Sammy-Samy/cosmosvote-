@@ -1,7 +1,7 @@
 import type { Proposal, VoteRecord } from '../types';
 import { formatTokenAmount } from '../utils';
 import { DelegationPanel } from './DelegationPanel';
-import { MyVotes } from './MyVotes';
+import { NotificationPreferences } from './NotificationPreferences';
 
 interface Props {
   walletAddress: string;
@@ -162,13 +162,8 @@ export function UserDashboard({
       {/* Delegation management */}
       <DelegationPanel walletAddress={walletAddress} />
 
-      {/* ── My Votes — full voter history ── */}
-      <MyVotes
-        proposals={proposals}
-        votedMap={votedMap}
-        decimals={decimals}
-        loading={loadingVotes}
-      />
+      {/* Notification preferences */}
+      <NotificationPreferences walletAddress={walletAddress} />
     </aside>
   );
 }
