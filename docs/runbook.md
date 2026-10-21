@@ -102,6 +102,67 @@ The transfer is only complete after Step 2. Until then, the original admin retai
 
 ## 5. Deploy a New Contract Version
 
+### 5a. In-Place WASM Upgrade (recommended for preserving contract ID)
+
+Upgrades the contract bytecode in-place, keeping the same contract ID and all on-chain state. Use this when the storage schema is unchanged or only additive.
+
+```bash
+# 1. Build the new WASM
+make build
+
+# 2. Upload the new WASM to the network and capture the hash
+NEW_WASM_HASH=$(stellar contract upload \
+  --wasm target/wasm32-unknown-unknown/release/cosmosvote_governance.wasm \
+  --source "$STELLAR_SECRET_KEY" \
+  --rpc-url "$STELLAR_RPC_URL" \
+  --network-passphrase "$NETWORK_PASSPHRASE" | jq -r '.hash')
+
+echo "New WASM hash: $NEW_WASM_HASH"
+
+# 3. (Optional but recommended) Pause before upgrading
+stellar contract invoke \
+  --id "$GOVERNANCE_CONTRACT_ID" \
+  --source "$STELLAR_SECRET_KEY" \
+  --rpc-url "$STELLAR_RPC_URL" \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- pause \
+  --admin "$(stellar keys address "$STELLAR_SECRET_KEY")"
+
+# 4. Invoke the upgrade entrypoint (admin only)
+stellar contract invoke \
+  --id "$GOVERNANCE_CONTRACT_ID" \
+  --source "$STELLAR_SECRET_KEY" \
+  --rpc-url "$STELLAR_RPC_URL" \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- upgrade \
+  --admin "$(stellar keys address "$STELLAR_SECRET_KEY")" \
+  --new_wasm_hash "$NEW_WASM_HASH"
+
+# 5. Verify state is preserved
+stellar contract invoke \
+  --id "$GOVERNANCE_CONTRACT_ID" \
+  --rpc-url "$STELLAR_RPC_URL" \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- get_config
+
+stellar contract invoke \
+  --id "$GOVERNANCE_CONTRACT_ID" \
+  --rpc-url "$STELLAR_RPC_URL" \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- proposal_count
+
+# 6. Unpause (if paused in step 3)
+stellar contract invoke \
+  --id "$GOVERNANCE_CONTRACT_ID" \
+  --source "$STELLAR_SECRET_KEY" \
+  --rpc-url "$STELLAR_RPC_URL" \
+  --network-passphrase "$NETWORK_PASSPHRASE" \
+  -- unpause \
+  --admin "$(stellar keys address "$STELLAR_SECRET_KEY")"
+```
+
+### 5b. Fresh Deploy (new contract ID)
+
 ```bash
 # 1. Build the updated WASM
 cargo build --release --target wasm32-unknown-unknown
@@ -157,6 +218,20 @@ Update `GOVERNANCE_CONTRACT_ID` and `TOKEN_CONTRACT_ID` in your `.env` file afte
 | `AlreadyInitialized` | 1 | `initialize` called on an already-initialized contract | Deploy a fresh contract instead |
 
 For the full error reference see [docs/errors.md](./errors.md).
+
+---
+
+## Post-Incident Procedure
+
+After any incident that causes user-visible impact or requires an emergency response, open a postmortem within 48 hours of resolution.
+
+1. Copy the template: `cp docs/postmortem-template.md docs/postmortems/YYYY-MM-DD-<slug>.md`
+2. Fill in all sections (timeline, root cause, impact, action items, lessons learned)
+3. Open a PR for team review
+4. Track action items to completion
+
+See [docs/postmortem-template.md](./postmortem-template.md) for the full template and guidance.
+For a completed example (hypothetical RPC outage), see [docs/postmortems/2024-03-15-rpc-outage.md](./postmortems/2024-03-15-rpc-outage.md).
 
 ---
 
