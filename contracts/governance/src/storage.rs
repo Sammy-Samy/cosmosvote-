@@ -256,6 +256,20 @@ impl GovernanceStorage {
         Self::bump_persistent_ttl(env, &key);
     }
 
+    // --- Choice votes (multi-choice proposals) ---
+
+    pub fn choice_votes(env: &Env, proposal_id: u64, choice_index: u32) -> i128 {
+        let key = PersistentKey::ChoiceVotes(proposal_id, choice_index);
+        let v = env.storage().persistent().get(&key).unwrap_or(0);
+        Self::bump_persistent_ttl(env, &key);
+        v
+    }
+    pub fn set_choice_votes(env: &Env, proposal_id: u64, choice_index: u32, v: i128) {
+        let key = PersistentKey::ChoiceVotes(proposal_id, choice_index);
+        env.storage().persistent().set(&key, &v);
+        Self::bump_persistent_ttl(env, &key);
+    }
+
     // Proposal count persisted to persistent storage to avoid instance write contention
     /// Convenience: check if a proposal is in a terminal state.
     pub fn is_terminal(state: &ProposalState) -> bool {
