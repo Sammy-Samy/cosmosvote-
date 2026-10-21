@@ -11,11 +11,22 @@ CosmosVote enables DAOs, protocols, and communities to create proposals, cast to
 
 ---
 
+## Demo
+
+<!-- TODO: Replace this placeholder with an embedded GIF once a screen recording of the proposal lifecycle on testnet has been captured. See issue #97. -->
+> 🎬 **Video walkthrough coming soon** — connect wallet → create proposal → vote → finalise.
+>
+> For now, follow the written step-by-step guide: [docs/proposal-lifecycle-walkthrough.md](docs/proposal-lifecycle-walkthrough.md)
+
+---
+
 ## Table of Contents
 
+- [Demo](#demo)
 - [Project Overview](#project-overview)
 - [Architecture.](#architecture)
 - [Features](#features)
+- [Vote Delegation](#vote-delegation)
 - [Quick Start](#quick-start)
 - [Project Structure](#project-structure)
 - [Governance Contract Reference](#governance-contract-reference)
@@ -108,6 +119,7 @@ sequenceDiagram
 | Events | Every state transition emits an on-chain event |
 | Tie handling | Tie (yes == no) results in rejection |
 | Admin vote restriction | When `restrict_admin_vote=true`, admin cannot vote on **any** proposal |
+| Voter count cap | `MAX_VOTER_COUNT = 10 000` — `cast_vote` returns `MaxVotersReached` when exceeded |
 
 ---
 
@@ -123,6 +135,56 @@ sequenceDiagram
 - **Admin controls** — pause/unpause, update quorum, transfer admin privileges
 - **Proposal cooldown** — optional rate limiting per proposer
 - **Minimum balance requirement** — optional minimum tokens to create proposals
+- **Voter count cap** — `MAX_VOTER_COUNT = 10 000` per proposal; prevents gas exhaustion in any future bulk-voter operation
+
+---
+
+## Vote Delegation
+
+Token holders can delegate their voting power to a trusted representative
+without transferring tokens. Delegation is recorded on-chain in the token
+contract and takes effect immediately.
+
+### Key Rules
+
+- **One level deep** — A delegates to B. B votes with their own balance. There is no transitive (multi-hop) delegation.
+- **Tokens stay in your wallet** — delegation does not move any tokens.
+- **One active delegation at a time** — call `undelegate` before switching delegates.
+- **Delegators cannot vote** — while an active delegation is in place, the delegating address gets `NoVotingPower` if it tries to cast a vote directly.
+- **Cycle prevention** — a direct cycle (A→B, B→A) is rejected with `DelegationCycle` (error 33).
+
+### Quick Reference
+
+| Action | Function | Who authorizes |
+|--------|----------|---------------|
+| Delegate voting power | `token.delegate(owner, delegate_to)` | `owner` |
+| Remove delegation | `token.undelegate(owner)` | `owner` |
+| Check current delegate | `token.get_delegation(owner)` → `Option<Address>` | anyone (read-only) |
+| Compute full delegated weight | `token.get_delegated_weight(voter, delegators)` | anyone (read-only) |
+
+### Example
+
+```
+Alice (10M VOTE) delegates to Bob (5M VOTE):
+  token.delegate(&alice, &bob)
+
+Bob votes Yes on a proposal:
+  governance.cast_vote(&bob, proposal_id, Vote::Yes)
+  → Bob's on-chain weight = 5M (own balance)
+
+Alice tries to vote — rejected:
+  governance.cast_vote(&alice, proposal_id, Vote::No)
+  → Err(NoVotingPower)
+
+Alice undelegates and votes on the next proposal:
+  token.undelegate(&alice)
+  governance.cast_vote(&alice, proposal_id_2, Vote::Yes)
+  → Alice's weight = 10M
+```
+
+See [docs/delegation.md](./docs/delegation.md) for the full delegation model,
+worked examples, edge cases, cycle detection behavior, and a delegated vs.
+non-delegated comparison table.
 
 ---
 
@@ -627,6 +689,15 @@ Key security properties:
 - Contract pause mechanism for emergency response
 - One-time initialization guard
 
+### Quorum Update Timelock
+
+`update_quorum` is protected by two complementary time-based guards to prevent manipulation:
+
+1. **Early-update window (first 10%)** — quorum can only be updated within the first 10% of the proposal's voting duration. This allows correction of accidental misconfiguration early on.
+2. **End-of-period lock (`QUORUM_TIMELOCK_SECS = 3600`)** — updates are additionally blocked when fewer than 3600 seconds (1 hour) remain before voting closes. This prevents last-minute quorum manipulation.
+
+Any call outside the allowed window returns `ContractError::QuorumUpdateNotAllowed`. See [ADR-007](./docs/adr/ADR-007-update-quorum-timelock.md) for the full rationale.
+
 ---
 
 ## Contributing
@@ -646,6 +717,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md). Quick checklist:
 - [Architecture Decision Records](./docs/adr/)
 - [Security Documentation](./docs/security/)
 - [Notification Service](./docs/notification-service.md)
+- [Notification Service Architecture & Sequence Diagrams](./docs/architecture-notification.md)
 - [Gas Budgeting Guide](./docs/gas-budgeting.md)
 
 ---

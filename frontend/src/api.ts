@@ -195,32 +195,43 @@ export async function fetchDelegatedWeight(voter: string, delegators: string[]):
 }
 
 /**
- * Cast a vote on an active proposal by signing and submitting a real Soroban
- * transaction via the user's connected wallet (Freighter or xBull).
+ * Encodes a vote into the Soroban contract's Vote enum ScVal.
  *
- * The `signTx` callback is provided by callers (typically the walletStore's
- * `signTransaction` action) so that this module stays decoupled from the
- * wallet store and remains easily testable.
+ * The contract's Vote enum variants:
+ *   0 = Yes, 1 = No, 2 = Abstain, 3 = Choice(u32 index)
  *
- * @param walletAddress - The voter's public key.
- * @param proposalId    - Numeric proposal ID.
- * @param vote          - 'Yes', 'No', or 'Abstain'.
- * @param signTx        - Async function that signs a raw XDR and returns the signed XDR.
- * @returns The submitted transaction hash.
+ * For standard votes pass a VoteType string ('Yes' | 'No' | 'Abstain').
+ * For named-choice proposals pass { choice: number } with the 0-based index.
+ *
+ * Issue #14: Add support for Vote::Choice(u32) multi-choice proposals.
  */
+export type VoteInput = 'Yes' | 'No' | 'Abstain' | { choice: number };
+
+function encodeVoteArg(vote: VoteInput): xdr.ScVal {
+  if (typeof vote === 'object' && 'choice' in vote) {
+    // Vote::Choice(u32) — encode as a map/struct ScVal matching the Rust enum
+    return xdr.ScVal.scvMap([
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol('Choice'),
+        val: nativeToScVal(BigInt(vote.choice), { type: 'u32' }),
+      }),
+    ]);
+  }
+  // Standard Yes / No / Abstain — encoded as simple u32 enum indices
+  const idx = { Yes: 0, No: 1, Abstain: 2 }[vote];
+  return nativeToScVal(idx, { type: 'u32' });
+}
+
 export async function castVote(
   walletAddress: string,
   proposalId: number,
-  vote: 'Yes' | 'No' | 'Abstain',
+  vote: VoteInput,
   signTx: (xdr: string, networkPassphrase: string) => Promise<string>,
 ): Promise<string> {
   // Fetch the current sequence number for the sender's account so the
   // transaction is valid on-chain.
   const accountData = await server.getAccount(walletAddress);
   const account = new Account(walletAddress, accountData.sequenceNumber());
-
-  // Convert vote string to the contract enum index.
-  const voteEnum = { Yes: 0, No: 1, Abstain: 2 }[vote];
 
   // Build the unsigned transaction.
   const tx = new TransactionBuilder(account, {
@@ -234,7 +245,7 @@ export async function castVote(
         args: [
           nativeToScVal(walletAddress, { type: 'address' }),
           nativeToScVal(BigInt(proposalId), { type: 'u64' }),
-          nativeToScVal(voteEnum, { type: 'u32' }),
+          encodeVoteArg(vote),
         ],
       })
     )
