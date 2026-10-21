@@ -9,6 +9,8 @@ export interface Proposal {
   title: string;
   description: string;
   cancellation_reason?: string | null;
+  /** Off-chain discussion link (e.g. forum thread). Must be HTTPS when present. */
+  discussion_url?: string | null;
   votes_yes: bigint;
   votes_no: bigint;
   votes_abstain: bigint;
