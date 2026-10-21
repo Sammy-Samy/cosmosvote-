@@ -2,6 +2,10 @@
 
 Thank you for your interest in contributing to CosmosVote! This document explains how to get involved.
 
+New contributors can start with the step-by-step
+[First-Time Contributor Onboarding Guide](docs/ONBOARDING.md), including setup,
+tests, linting, and a local proposal walkthrough.
+
 ## Code of Conduct
 
 Be respectful, inclusive, and constructive. We follow the [Contributor Covenant](https://www.contributor-covenant.org/).
