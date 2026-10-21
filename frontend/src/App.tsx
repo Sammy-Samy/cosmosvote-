@@ -133,6 +133,15 @@ export default function App() {
     return filtered.slice(start, start + PAGE_SIZE);
   }, [filtered, safePage]);
 
+  // AriaLive page-change announcement (Issue #19)
+  const [pageAnnouncement, setPageAnnouncement] = useState('');
+
+  const goToPage = (next: number) => {
+    setPage(next);
+    setPageAnnouncement(`Page ${next} of ${totalPages}`);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   const handleProposalCreated = (id: number) => {
     setAnnouncement(`Proposal #${id} created. Refreshing list…`);
     fetchAllProposals().then(setProposals).catch(() => {});
@@ -160,7 +169,7 @@ export default function App() {
 
   return (
     <div style={{ minHeight: '100vh', background: '#f8fafc', fontFamily: 'system-ui, sans-serif' }}>
-      <AriaLive polite={announcement} assertive={error ?? undefined} />
+      <AriaLive polite={announcement || pageAnnouncement} assertive={error ?? undefined} />
 
       {/* Header */}
       <header style={{ background: 'var(--bg-header)', color: 'var(--text-header)', padding: '1rem 2rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>
@@ -388,14 +397,9 @@ export default function App() {
               totalPages={totalPages}
               totalCount={filtered.length}
               pageSize={PAGE_SIZE}
-              onPrev={() => {
-                setPage(p => Math.max(1, p - 1));
-                window.scrollTo({ top: 0, behavior: 'smooth' });
-              }}
-              onNext={() => {
-                setPage(p => Math.min(totalPages, p + 1));
-                window.scrollTo({ top: 0, behavior: 'smooth' });
-              }}
+              onPrev={() => goToPage(Math.max(1, safePage - 1))}
+              onNext={() => goToPage(Math.min(totalPages, safePage + 1))}
+              onPage={goToPage}
             />
           )}
 
