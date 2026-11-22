@@ -6,6 +6,12 @@ New contributors can start with the step-by-step
 [First-Time Contributor Onboarding Guide](docs/ONBOARDING.md), including setup,
 tests, linting, and a local proposal walkthrough.
 
+For platform-specific local development setup — prerequisites and version
+requirements, known issues, and workarounds for **macOS**, **Linux**, and
+**Windows/WSL2** — see [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md).
+Review the notes for your platform before running `make fmt`, `make lint`,
+`make test`, or `make build`.
+
 ## Code of Conduct
 
 Be respectful, inclusive, and constructive. We follow the [Contributor Covenant](https://www.contributor-covenant.org/).
@@ -30,7 +36,9 @@ Open a GitHub Discussion or Issue tagged `enhancement`. Describe the use case an
 2. **Clone** your fork: `git clone https://github.com/your-username/cosmosvote.git`
 3. **Create a branch**: `git checkout -b feat/your-feature-name`
 4. **Make your changes**
-5. **Run the full check suite**:
+5. **Run the full check suite** (see
+   [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) for platform-specific
+   setup and known issues on macOS, Linux, and Windows/WSL2):
    ```bash
    make fmt
    make lint
@@ -90,6 +98,7 @@ Open a GitHub Discussion or Issue tagged `enhancement`. Describe the use case an
 - [ ] Storage schema changes are tracked in storage helpers
 - [ ] Documentation and README are updated if needed
 - [ ] `make fmt`, `make lint`, and `make test` pass
+- [ ] Platform-specific setup notes in `docs/GETTING_STARTED.md` are updated if the change affects local development on macOS, Linux, or Windows/WSL2
 
 ## Pull Request Requirements
 
@@ -298,6 +307,9 @@ updated stuff
 - Keep PRs focused — one issue or feature per PR.
 - Self-review your diff before requesting review.
 - Ensure `make fmt`, `make lint`, and `make test` all pass locally before pushing.
+- If you develop on macOS or Windows/WSL2, confirm your environment matches the
+  prerequisites in [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) and note
+  any platform-specific workarounds you used in the PR description.
 
 ### Lint Rules Summary
 
