@@ -234,6 +234,22 @@ impl GovernanceEvents {
         );
     }
 
+    /// Emitted when the admin updates the minimum token balance required to
+    /// create a proposal via `update_min_proposal_balance`.
+    ///
+    /// Fields: `(admin, old_value, new_value)`
+    pub fn min_proposal_balance_updated(
+        env: &Env,
+        admin: &Address,
+        old_value: i128,
+        new_value: i128,
+    ) {
+        env.events().publish(
+            (symbol_short!("gov"), symbol_short!("min_bal")),
+            (admin.clone(), old_value, new_value),
+        );
+    }
+
     pub fn cooldown_updated(env: &Env, admin: &Address, old_value: u64, new_value: u64) {
         env.events().publish(
             (symbol_short!("gov"), symbol_short!("cooldown")),
