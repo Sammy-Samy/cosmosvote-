@@ -358,3 +358,38 @@ fn test_admin_transfer_accepted_event_includes_timestamp() {
     let expected = (admin.clone(), new_admin.clone(), accept_ts).into_val(&env);
     assert_eq!(ev.2, expected);
 }
+
+// ---------------------------------------------------------------------------
+// voting_token_updated  (issue #445)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_voting_token_updated_event() {
+    let env = Env::default();
+    let t = setup(&env);
+    let gov_id = t.governance.address.clone();
+    let admin = t.admin.clone();
+    let old_token = t.token.address.clone();
+    let new_token = Address::generate(&env);
+
+    t.governance.update_voting_token(&admin, &new_token);
+
+    let all = env.events().all();
+    let ev = all
+        .iter()
+        .rev()
+        .find(|(cid, topics, _)| {
+            *cid == gov_id
+                && *topics
+                    == vec![
+                        &env,
+                        symbol_short!("gov").into_val(&env),
+                        symbol_short!("token").into_val(&env),
+                    ]
+        })
+        .expect("voting_token_updated event not emitted");
+
+    // Verify payload: (old_token, new_token, admin)
+    let expected = (old_token, new_token.clone(), admin.clone()).into_val(&env);
+    assert_eq!(ev.2, expected);
+}

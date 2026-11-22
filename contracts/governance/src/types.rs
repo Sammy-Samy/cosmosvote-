@@ -48,6 +48,9 @@ pub enum ContractError {
     VotesAlreadyCast    = 36,
     InvalidLink         = 37,
     InvalidChoice       = 38,
+    TooFewChoices       = 39,
+    TooManyChoices      = 42,
+    InvalidChoiceLength = 43,
 
     // Contract state
     ContractPaused      = 40,

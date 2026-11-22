@@ -51,6 +51,8 @@ pub enum InstanceKey {
     Paused,
     /// Basis-points threshold for vote-concentration circuit breaker (0 = disabled).
     ConcentrationThresholdBps,
+    /// Configurable maximum number of simultaneously active proposals.
+    MaxActiveProposals,
 }
 
 #[soroban_sdk::contracttype]
@@ -193,6 +195,20 @@ impl GovernanceStorage {
         env.storage()
             .instance()
             .set(&InstanceKey::ConcentrationThresholdBps, &v);
+    }
+
+    /// Returns the maximum number of simultaneously active proposals.
+    /// Defaults to `MAX_ACTIVE_PROPOSALS` when not explicitly configured.
+    pub fn max_active_proposals(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&InstanceKey::MaxActiveProposals)
+            .unwrap_or(crate::MAX_ACTIVE_PROPOSALS)
+    }
+    pub fn set_max_active_proposals(env: &Env, v: u32) {
+        env.storage()
+            .instance()
+            .set(&InstanceKey::MaxActiveProposals, &v);
     }
 
     // --- Persistent ---

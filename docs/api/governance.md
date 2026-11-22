@@ -15,6 +15,7 @@ pub fn initialize(
     proposal_cooldown: u64,
     min_quorum_bps: u32,
     restrict_admin_vote: bool,
+    max_active_proposals: u32,
 ) -> Result<(), ContractError>
 ```
 
@@ -28,6 +29,7 @@ pub fn initialize(
 | `proposal_cooldown` | `u64` | Seconds a proposer must wait between proposals (`0` = no cooldown) |
 | `min_quorum_bps` | `u32` | Minimum quorum floor in basis points, e.g. `500` = 5% (`0` = no floor) |
 | `restrict_admin_vote` | `bool` | If `true`, admin cannot vote on proposals they created |
+| `max_active_proposals` | `u32` | Maximum number of simultaneously active proposals (`0` = use the default `MAX_ACTIVE_PROPOSALS` of 100) |
 
 **Returns:** `Ok(())` on success.
 
@@ -43,6 +45,7 @@ gov.initialize(
     &86_400u64,     // 1-day cooldown
     &500u32,        // 5% quorum floor
     &true,          // admin cannot vote on own proposals
+    &100u32,        // at most 100 active proposals (0 = default 100)
 );
 ```
 
@@ -118,6 +121,10 @@ pub fn create_proposal(
 | 19 | `ProposalCooldown` | Proposer is within cooldown window |
 | 20 | `QuorumBelowFloor` | Quorum < `min_quorum_bps` floor |
 | 40 | `ContractPaused` | Contract is paused |
+| 42 | `ProposalsStillActive` | Active proposal count has reached the configured `max_active_proposals` limit |
+| 43 | `TooFewChoices` | Multi-choice proposal supplied fewer than 2 choices |
+| 44 | `TooManyChoices` | Multi-choice proposal supplied more than 10 choices |
+| 45 | `InvalidChoiceLength` | A choice string is empty or longer than 64 characters |
 
 **Example**
 
@@ -241,6 +248,27 @@ pub fn get_vote(env: Env, proposal_id: u64, voter: Address) -> Result<VoteRecord
 **Returns:** `Ok(VoteRecord { vote, weight })` for the voter's recorded vote.
 
 **Errors:** `VoteNotFound (27)` if the voter has not voted.
+
+---
+
+## `get_vote_record`
+
+```rust
+pub fn get_vote_record(env: Env, proposal_id: u64, voter: Address) -> Option<VoteRecord>
+```
+
+**Returns:** `Some(VoteRecord { vote, weight })` for the voter's recorded vote, or `None` if the voter has not voted on the proposal. Unlike `get_vote`, this query never errors on a missing record.
+
+**Authentication:** None — this is a read-only query callable without auth.
+
+**Example**
+
+```rust
+match gov.get_vote_record(&proposal_id, &voter) {
+    Some(record) => assert_eq!(record.vote, Vote::Yes),
+    None => { /* voter has not voted */ }
+}
+```
 
 ---
 
@@ -403,5 +431,9 @@ Read-only accessors for admin address, pending admin (if any), and contract vers
 | 34 | `NotPendingAdmin` | Caller is not the pending admin |
 | 40 | `ContractPaused` | Contract is paused |
 | 41 | `NotPaused` | Contract is not paused |
+| 42 | `ProposalsStillActive` | Active proposal limit reached |
+| 43 | `TooFewChoices` | Fewer than 2 choices supplied |
+| 44 | `TooManyChoices` | More than 10 choices supplied |
+| 45 | `InvalidChoiceLength` | Choice string empty or > 64 chars |
 | 50 | `ArithmeticOverflow` | Integer overflow |
 | 61 | `MaxVotersReached` | Proposal has reached the `MAX_VOTER_COUNT` (10 000) unique voter limit |

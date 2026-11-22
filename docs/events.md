@@ -263,9 +263,36 @@ Emitted on an immediate (single-step) admin transfer.
 
 ---
 
+### `voting_token_updated`
+
+Emitted when the admin changes the governance voting token via
+`update_voting_token`. Off-chain indexers can use this event to track which
+token contract is used to compute vote weights.
+
+| Field | Topic index | Type | Description |
+|-------|-------------|------|-------------|
+| contract_tag | 0 | Symbol | `"gov"` |
+| event_tag | 1 | Symbol | `"token"` |
+
+| Field | Data index | Type | Description |
+|-------|------------|------|-------------|
+| old_token | 0 | Address | Previous voting token contract address |
+| new_token | 1 | Address | New voting token contract address |
+| admin | 2 | Address | Admin that performed the update |
+
+```json
+{
+  "topics": ["gov", "token"],
+  "data": ["CABC...OLD", "CABC...NEW", "GABC...ADMIN"]
+}
+```
+
+---
+
 ### `paused`
 
 Emitted when the admin pauses the contract.
+=======
 
 | Field | Topic index | Type | Description |
 |-------|-------------|------|-------------|
@@ -467,6 +494,7 @@ Emitted when the token admin is changed.
 | gov | admin_transfer_proposed | `gov`, `propose` | current_admin, pending_admin, timestamp |
 | gov | admin_transfer_accepted | `gov`, `accept` | previous_admin, new_admin, timestamp |
 | gov | admin_transferred | `gov`, `admin` | old_admin, new_admin |
+| gov | voting_token_updated | `gov`, `token` | old_token, new_token, admin |
 | gov | paused | `gov`, `paused` | admin |
 | gov | unpaused | `gov`, `unpause` | admin |
 | token | initialized | `token`, `init` | admin, supply |

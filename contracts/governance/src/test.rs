@@ -36,7 +36,7 @@ fn setup(env: &Env) -> (GovernanceContractClient<'_>, TokenContractClient<'_>, A
 
     let gov_id = env.register(GovernanceContract, ());
     let gov = GovernanceContractClient::new(env, &gov_id);
-    gov.initialize(&admin, &token_id, &0i128, &0u64, &0u32, &false, &None, &0u32);
+    gov.initialize(&admin, &token_id, &0i128, &0u64, &0u32, &false, &None, &0u32, &0u32);
 
     (gov, token, admin, voter, voter2)
 }
@@ -1845,6 +1845,67 @@ fn test_active_proposal_limit() {
         &None,
     );
     assert_eq!(result, Err(Ok(ContractError::ProposalsStillActive)));
+}
+
+#[test]
+fn test_create_proposal_rejected_at_active_limit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let voter = Address::generate(&env);
+
+    let token_id = env.register(TokenContract, ());
+    let token = TokenContractClient::new(&env, &token_id);
+    token.initialize(&admin, &1_000_000_000i128, &String::from_str(&env, "CosmosVote"), &String::from_str(&env, "VOTE"), &7u32);
+    token.mint(&admin, &voter, &10_000_000i128);
+
+    let gov_id = env.register(GovernanceContract, ());
+    let gov = GovernanceContractClient::new(&env, &gov_id);
+    // max_active_proposals = 2
+    gov.initialize(&admin, &token_id, &0i128, &0u64, &0u32, &false, &None, &0u32, &2u32);
+
+    // Fill up to the limit
+    make_proposal(&gov, &env, &voter);
+    make_proposal(&gov, &env, &voter);
+
+    // Next proposal should be rejected
+    let result = gov.try_create_proposal(
+        &voter,
+        &String::from_str(&env, "Over Limit"),
+        &String::from_str(&env, "This should fail"),
+        &1_000_000i128,
+        &3600u64,
+        &None,
+        &None,
+    );
+    assert_eq!(result, Err(Ok(ContractError::ProposalsStillActive)));
+}
+
+// ---------------------------------------------------------------------------
+// get_vote_record query (#449)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_vote_record_voted() {
+    let env = Env::default();
+    let (gov, _, _, voter, _) = setup(&env);
+    let id = make_proposal(&gov, &env, &voter);
+    gov.cast_vote(&voter, &id, &Vote::Yes);
+
+    let record = gov.get_vote_record(&id, &voter);
+    assert!(record.is_some());
+    let record = record.unwrap();
+    assert_eq!(record.vote, Vote::Yes);
+    assert_eq!(record.weight, 10_000_000);
+}
+
+#[test]
+fn test_get_vote_record_not_voted() {
+    let env = Env::default();
+    let (gov, _, _, voter, _) = setup(&env);
+    let id = make_proposal(&gov, &env, &voter);
+
+    assert_eq!(gov.get_vote_record(&id, &voter), None);
 }
 
 // ---------------------------------------------------------------------------
