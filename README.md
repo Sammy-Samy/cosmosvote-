@@ -377,11 +377,21 @@ pub fn create_proposal(
     proposer: Address,
     title: String,        // 1–128 chars
     description: String,  // 1–1024 chars
-    quorum: i128,         // > 0, <= total supply
+    quorum: i128,         // >= quorum floor, <= total supply
     duration: u64,        // 60–2,592,000 seconds
     payload: Option<ExecutionPayload>, // Optional on-chain action
 ) -> Result<u64, ContractError>
 ```
+
+**Quorum floor:** the `quorum` value must be at least
+`total_supply * min_quorum_bps / 10000` (the floor configured at
+`initialize`). A proposal requesting a lower quorum is rejected with
+`ContractError::QuorumBelowFloor`.
+
+**Treasury action limit:** a proposal may carry at most **10** treasury
+actions (`MAX_TREASURY_ACTIONS = 10`). Exceeding this limit returns
+`ContractError::TooManyTreasuryActions`. This bounds ledger storage and
+execution cost per proposal.
 
 ### Cast Vote
 
@@ -401,6 +411,9 @@ pub fn finalise(env: Env, proposal_id: u64) -> Result<(), ContractError>
 ```
 
 Pass conditions: `total_votes >= quorum AND votes_yes > votes_no`
+
+Vote weight is snapshot-based: each voter's weight is their token balance
+at the time they cast their vote.
 
 The `finalise()` function is permissionless and is intended to be called by an off-chain keeper or bot after the voting period ends. This ensures proposals do not stay stuck in `Active` state even if no single voter submits the finalization transaction.
 

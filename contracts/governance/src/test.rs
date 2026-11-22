@@ -583,6 +583,7 @@ fn test_vote_uses_snapshot_balance() {
         &1i128,
         &3600u64,
         &None,
+        &None,
     );
 
     // Mint more tokens after proposal creation
@@ -830,7 +831,7 @@ fn test_finalise_repeated_call_returns_not_active() {
 fn test_finalise_tie_rejected() {
     let env = Env::default();
     let (gov, token, admin, voter, voter2) = setup(&env);
-    // Make equal balances
+    // Make equal balances BEFORE the proposal snapshot is taken
     token.mint(&admin, &voter2, &5_000_000i128); // voter2 now has 10M
     let id = gov.create_proposal(
         &voter,
@@ -1543,6 +1544,60 @@ fn test_execute_with_treasury_action() {
 }
 
 // ---------------------------------------------------------------------------
+// Treasury action list length limit (issue #440)
+// ---------------------------------------------------------------------------
+
+fn make_treasury_actions(env: &Env, count: u32, asset: &Address) -> soroban_sdk::Vec<TreasuryAction> {
+    let mut actions = soroban_sdk::Vec::new(env);
+    for _ in 0..count {
+        actions.push_back(TreasuryAction {
+            recipient: Address::generate(env),
+            amount: 1_000i128,
+            asset: TreasuryAsset::Token(asset.clone()),
+        });
+    }
+    actions
+}
+
+#[test]
+fn test_create_proposal_accepts_exactly_max_treasury_actions() {
+    let env = Env::default();
+    let (gov, token, _, voter, _) = setup(&env);
+    let actions = make_treasury_actions(&env, 10, &token.address);
+
+    let id = gov.create_proposal(
+        &voter,
+        &String::from_str(&env, "Max Treasury Actions"),
+        &String::from_str(&env, "Exactly the maximum number of treasury actions"),
+        &5_000_000i128,
+        &604_800u64,
+        &None,
+        &Some(actions.clone()),
+    );
+
+    let proposal = gov.get_proposal(&id);
+    assert_eq!(proposal.treasury_action.len(), 10);
+}
+
+#[test]
+fn test_create_proposal_rejects_too_many_treasury_actions() {
+    let env = Env::default();
+    let (gov, token, _, voter, _) = setup(&env);
+    let actions = make_treasury_actions(&env, 11, &token.address);
+
+    let result = gov.try_create_proposal(
+        &voter,
+        &String::from_str(&env, "Too Many Treasury Actions"),
+        &String::from_str(&env, "One more than the maximum number of treasury actions"),
+        &5_000_000i128,
+        &604_800u64,
+        &None,
+        &Some(actions),
+    );
+    assert_eq!(result, Err(Ok(ContractError::TooManyTreasuryActions)));
+}
+
+// ---------------------------------------------------------------------------
 // amend_proposal
 // ---------------------------------------------------------------------------
 
@@ -1856,6 +1911,7 @@ fn test_multi_choice_proposal_passes_with_winner() {
     let env = Env::default();
     let (gov, token, admin, voter, voter2) = setup(&env);
     let voter3 = Address::generate(&env);
+    // Minted before proposal creation so the snapshot captures the balance.
     token.mint(&admin, &voter3, &2_000_000i128);
 
     let mut choices = soroban_sdk::Vec::new(&env);
@@ -2073,6 +2129,7 @@ fn test_circuit_breaker_below_threshold_passes() {
     let (gov, token, admin, voter, _) = setup_with_threshold(&env, 5000u32);
 
     // Give voter 40% of supply (400M / 1B = 40%) — below 50% threshold
+    // Minted before proposal creation so the snapshot captures the balance.
     token.mint(&admin, &voter, &400_000_000i128);
 
     let id = gov.create_proposal(
@@ -2100,6 +2157,7 @@ fn test_circuit_breaker_above_threshold_pauses() {
     let (gov, token, admin, voter, _) = setup_with_threshold(&env, 5000u32);
 
     // Give voter 60% of supply — above 50% threshold
+    // Minted before proposal creation so the snapshot captures the balance.
     token.mint(&admin, &voter, &600_000_000i128);
 
     let id = gov.create_proposal(
@@ -2132,6 +2190,7 @@ fn test_circuit_breaker_at_threshold_does_not_pause() {
     // Use supply of exactly 1_000_000_000. Give voter exactly 500_000_000 (50%).
     // 500M * 10_000 = 5_000_000_000_000 == 5000 * 1_000_000_000 = 5_000_000_000_000
     // lhs == rhs → NOT strictly greater, so no pause.
+    // Minted before proposal creation so the snapshot captures the balance.
     token.mint(&admin, &voter, &500_000_000i128);
 
     let id = gov.create_proposal(
@@ -2157,6 +2216,7 @@ fn test_circuit_breaker_threshold_zero_disables() {
     let (gov, token, admin, voter, _) = setup_with_threshold(&env, 0u32);
 
     // Give voter 100% of supply (well, admin already has 1B; mint more for voter)
+    // Minted before proposal creation so the snapshot captures the balance.
     token.mint(&admin, &voter, &900_000_000i128);
 
     let id = gov.create_proposal(

@@ -12,7 +12,7 @@ use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env, String};
 
 use crate::{
     types::{ProposalState, Vote},
-    GovernanceContract, GovernanceContractClient,
+    GovernanceContract, GovernanceContractClient, GovernanceError,
 };
 use cosmosvote_token::{TokenContract, TokenContractClient};
 
@@ -234,4 +234,74 @@ fn test_yes_wins_by_one_token_passes() {
     gov.cast_vote(&no_voter, &id, &Vote::No);
     finalise(&gov, &env, id);
     assert_eq!(gov.get_proposal(&id).state, ProposalState::Passed);
+}
+
+// ---------------------------------------------------------------------------
+// Quorum floor (min_quorum_bps) enforcement
+// ---------------------------------------------------------------------------
+
+const TOTAL_SUPPLY: i128 = 1_000_000_000i128;
+const MIN_QUORUM_BPS: u32 = 100; // 1% of total supply
+
+/// Sets up a governance contract with a non-zero `min_quorum_bps`.
+fn setup_with_floor(env: &Env) -> (GovernanceContractClient<'_>, TokenContractClient<'_>, Address) {
+    env.mock_all_auths();
+    let admin = Address::generate(env);
+
+    let token_id = env.register(TokenContract, ());
+    let token = TokenContractClient::new(env, &token_id);
+    token.initialize(
+        &admin,
+        &TOTAL_SUPPLY,
+        &String::from_str(env, "CosmosVote"),
+        &String::from_str(env, "VOTE"),
+        &7u32,
+    );
+
+    let gov_id = env.register(GovernanceContract, ());
+    let gov = GovernanceContractClient::new(env, &gov_id);
+    gov.initialize(
+        &admin,
+        &token_id,
+        &0i128,
+        &0u64,
+        &MIN_QUORUM_BPS,
+        &false,
+        &None,
+        &0u32,
+    );
+
+    (gov, token, admin)
+}
+
+/// Quorum one token below the floor → rejected with `QuorumBelowFloor`.
+#[test]
+fn test_quorum_below_floor_rejects() {
+    let env = Env::default();
+    let (gov, token, admin) = setup_with_floor(&env);
+    let floor = TOTAL_SUPPLY * MIN_QUORUM_BPS as i128 / 10_000;
+    let proposer = make_voter(&env, &token, &admin, 10_000);
+
+    let result = gov.try_create_proposal(
+        &proposer,
+        &String::from_str(&env, "Quorum Floor Test"),
+        &String::from_str(&env, "Testing quorum floor enforcement"),
+        &(floor - 1),
+        &3600u64,
+        &None,
+        &None,
+    );
+    assert_eq!(result, Err(Ok(GovernanceError::QuorumBelowFloor)));
+}
+
+/// Quorum exactly at the floor → accepted.
+#[test]
+fn test_quorum_at_floor_accepted() {
+    let env = Env::default();
+    let (gov, token, admin) = setup_with_floor(&env);
+    let floor = TOTAL_SUPPLY * MIN_QUORUM_BPS as i128 / 10_000;
+    let proposer = make_voter(&env, &token, &admin, 10_000);
+
+    let id = create_proposal(&gov, &env, &proposer, floor);
+    assert_eq!(gov.get_proposal(&id).quorum, floor);
 }

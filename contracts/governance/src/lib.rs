@@ -453,9 +453,10 @@ impl GovernanceContract {
             return Err(ContractError::NoVotingPower);
         }
 
-        // Include the balances of accounts that delegated to this voter.
-        let delegators = token_client.get_delegators(&voter);
-        let weight = token_client.get_delegated_weight(&voter, &delegators);
+        // Vote weight is fixed at proposal creation: use the voter's balance
+        // at the proposal's snapshot ledger so tokens acquired after creation
+        // (or sold before voting) do not affect the outcome.
+        let weight = token_client.balance_at(&voter, proposal.snapshot_ledger);
         if weight <= 0 {
             return Err(ContractError::NoVotingPower);
         }
