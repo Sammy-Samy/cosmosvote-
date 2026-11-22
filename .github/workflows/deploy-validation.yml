@@ -6,12 +6,14 @@ on:
     paths:
       - "scripts/deploy_testnet.sh"
       - "scripts/deploy_mainnet.sh"
+      - "infra/terraform/**"
       - ".github/workflows/deploy-validation.yml"
   pull_request:
     branches: [main, develop]
     paths:
       - "scripts/deploy_testnet.sh"
       - "scripts/deploy_mainnet.sh"
+      - "infra/terraform/**"
       - ".github/workflows/deploy-validation.yml"
 
 jobs:
@@ -48,3 +50,49 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Bash syntax check
         run: bash -n scripts/deploy_mainnet.sh
+
+  infracost:
+    name: Infracost cost estimation
+    runs-on: ubuntu-latest
+    # Only run on pull requests so the cost diff can be posted as a PR comment.
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+      # Fail the job (and require manual approval) for any monthly cost increase.
+      COST_THRESHOLD: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install Infracost CLI
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/infracost/infracost/master/scripts/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Generate Infracost breakdown
+        run: |
+          infracost breakdown \
+            --path infra/terraform \
+            --format json \
+            --out-file infracost.json
+      - name: Post cost diff as PR comment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          infracost comment github \
+            --path infracost.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --pull-request "$PR_NUMBER" \
+            --github-token "$GITHUB_TOKEN" \
+            --behavior update
+      - name: Enforce cost threshold
+        run: |
+          # Sum the monthly cost diff across all projects in the breakdown.
+          total=$(jq '[.projects[].diffTotalMonthlyCost // "0" | tonumber] | add // 0' infracost.json)
+          echo "Total monthly cost diff: \$${total}"
+          if awk -v t="$total" -v th="$COST_THRESHOLD" 'BEGIN { exit !(t > th) }'; then
+            echo "::error::Estimated monthly cost increase of \$${total} exceeds threshold of \$${COST_THRESHOLD}/month. Manual approval required before merge."
+            exit 1
+          fi
+          echo "Cost diff within threshold (\$${COST_THRESHOLD}/month)."

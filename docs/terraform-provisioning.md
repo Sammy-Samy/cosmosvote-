@@ -97,6 +97,46 @@ Additional variables are set via `.env`:
 | `TOKEN_CONTRACT_ID` | Deployed token contract address |
 | `NETWORK` | Active environment (`local`/`testnet`/`mainnet`) |
 
+## Cost Estimation (Infracost)
+
+Pull requests that touch `infra/terraform/` automatically run [Infracost](https://www.infracost.io/) to estimate the cost impact of the change.
+
+### How it works
+
+1. The Terraform CI workflow runs `infracost breakdown` on the base branch and on the PR branch.
+2. `infracost diff` computes the monthly cost delta.
+3. The diff is posted as a comment on the PR, so reviewers can see cost changes alongside the code.
+
+### Approval threshold
+
+If the estimated monthly cost increase exceeds **$0/month**, the PR requires manual approval from a maintainer before it can be merged. Review the cost diff comment and approve the workflow run (or the PR) only after confirming the increase is intentional.
+
+### Setting up `INFRACOST_API_KEY`
+
+The workflow requires an Infracost API key, stored as a repository secret:
+
+1. Sign up at [dashboard.infracost.io](https://dashboard.infracost.io/) and generate an API key.
+2. In GitHub, go to **Settings → Secrets and variables → Actions**.
+3. Add a new repository secret named `INFRACOST_API_KEY` with the generated key.
+
+### Running locally
+
+To estimate costs before opening a PR:
+
+```bash
+# Install the CLI (see https://www.infracost.io/docs/#quick-start)
+# then authenticate once:
+infracost auth login
+
+# Show the cost breakdown for the Terraform configuration
+infracost breakdown --path infra/terraform
+
+# Compare against a saved baseline to see the diff
+infracost breakdown --path infra/terraform --format json --out-file infracost-base.json
+# (make your changes, then)
+infracost diff --path infra/terraform --compare-to infracost-base.json
+```
+
 ## Troubleshooting
 
 ### `Error: account not found`

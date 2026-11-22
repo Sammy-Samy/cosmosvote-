@@ -73,6 +73,90 @@ fetch(process.env.SLACK_WEBHOOK_URL, {
 // PagerDuty, email, SNS, etc.
 ```
 
+## Log Aggregation
+
+Backend containers write newline-delimited JSON to stdout. Docker Compose ships with a `logging` driver configured for every backend service so logs survive container restarts and are queryable centrally.
+
+### Logging Driver
+
+Two drivers are supported; pick one via `LOG_DRIVER` in your `.env`:
+
+| `LOG_DRIVER` | Driver | Notes |
+|--------------|--------|-------|
+| `awslogs` (default) | Amazon CloudWatch Logs | Requires `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (or an instance role). Log group: `${LOG_GROUP_PREFIX:-cosmosvote}/backend`. |
+| `loki` | Grafana Loki | Requires the `loki` Docker logging plugin (`docker plugin install grafana/loki-docker-driver:latest --alias loki --grant-all-permissions`) and `LOKI_URL`. |
+
+Example Compose snippet (already applied to backend services):
+
+```yaml
+logging:
+  driver: ${LOG_DRIVER:-awslogs}
+  options:
+    awslogs-region: ${AWS_REGION:-us-east-1}
+    awslogs-group: ${LOG_GROUP_PREFIX:-cosmosvote}/backend
+    awslogs-stream: ${SERVICE_NAME:-backend}-{{.Name}}
+    awslogs-create-group: "true"
+    # Loki alternative:
+    # loki-url: ${LOKI_URL}
+    # loki-retries: "3"
+    # loki-batch-wait: "1s"
+```
+
+### Retention Policy
+
+- **Minimum retention: 30 days** for all backend log streams.
+- CloudWatch: set the log group retention to `30` (or longer) days:
+  ```bash
+  aws logs put-retention-policy \
+    --log-group-name "${LOG_GROUP_PREFIX:-cosmosvote}/backend" \
+    --retention-in-days 30
+  ```
+- Loki: configure the `limits_config.retention_period: 720h` (30 days) in the Loki config, or a longer period for compliance needs.
+- Retention is enforced by the aggregation backend, not by Docker; local `json-file` rotation is disabled for aggregated services.
+
+### Querying Logs
+
+CloudWatch Logs Insights:
+
+```
+fields @timestamp, level, service, event, traceId, err
+| filter level = "error"
+| sort @timestamp desc
+| limit 100
+```
+
+Loki (LogQL):
+
+```logql
+{service="backend"} | json | level="error"
+{service="backend"} | json | event="LARGE_TOKEN_TRANSFER"
+{service="backend"} | json | traceId="<trace-id>"
+```
+
+### Structured Log Fields
+
+Emitted by `backend/src/logger.ts`. All lines are JSON objects with the following fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `timestamp` | string (ISO 8601) | Time the record was emitted |
+| `level` | string | `debug`, `info`, `warn`, or `error` |
+| `service` | string | Service name (e.g. `backend`) |
+| `pid` | number | Process ID of the emitting worker |
+| `traceId` | string | Request/correlation ID for tracing across services |
+| `event` | string | Logical event name (e.g. `LARGE_TOKEN_TRANSFER`) |
+| `err` | object | Serialized error (`message`, `stack`, `name`) when `level=error` |
+| `webhookUrl` | string | **Redacted** — replaced with `[REDACTED]` |
+| `email` | string | **Redacted** |
+| `secretKey` | string | **Redacted** |
+| `password` | string | **Redacted** |
+| `token` | string | **Redacted** |
+| `apiKey` | string | **Redacted** |
+| `authorization` | string | **Redacted** |
+| `dsn` | string | **Redacted** |
+
+Sensitive fields are scrubbed by the logger before serialization; never log raw credentials. Use `traceId` to correlate a request across services and `event` for alert-oriented queries.
+
 ## Running in Production
 
 For continuous operation, run the script under a process manager:
