@@ -3,6 +3,7 @@ import { initErrorTracking, flushErrorTracking } from './errorTracking';
 import { createHealthServer } from './health';
 import { NotificationService } from './notificationService';
 import { logger } from './logger';
+import { checkTlsEnforcement } from './tlsEnforcement';
 import helmet from 'helmet';
 
 // Validate env vars before anything else — fails fast with a clear message.
@@ -10,6 +11,9 @@ const env = loadEnv();
 
 // Must be called before any async work so unhandled rejections are captured.
 initErrorTracking();
+
+// Warn at boot if TLS certificate validation has been globally disabled.
+checkTlsEnforcement();
 
 // Initialize the append-only audit log for admin operations.
 auditLogger.init({ logPath: env.AUDIT_LOG_PATH });

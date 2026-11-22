@@ -4,6 +4,7 @@
  */
 
 import axios from 'axios';
+import https from 'https';
 import { captureError } from './errorTracking';
 import { logger } from './logger';
 import { validateWebhookUrl } from './webhookUrlValidator';
@@ -17,6 +18,31 @@ import {
 const MAX_POLL_FAILURES = 3;
 const MAX_WEBHOOK_RETRIES = 3;
 const INITIAL_WEBHOOK_RETRY_DELAY_MS = 1_000;
+
+/**
+ * Agent used for all outgoing webhook deliveries. TLS certificate validation
+ * is explicitly enforced so that a globally disabled
+ * `NODE_TLS_REJECT_UNAUTHORIZED=0` cannot silently weaken webhook traffic.
+ */
+export const webhookHttpsAgent = new https.Agent({
+  rejectUnauthorized: true,
+  keepAlive: true,
+});
+
+/**
+ * Startup guard: warn loudly if TLS validation has been globally disabled.
+ */
+export function checkTlsEnforcement(): void {
+  if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === '0') {
+    logger.warn(
+      {
+        event: 'tls_validation_disabled',
+        env: 'NODE_TLS_REJECT_UNAUTHORIZED',
+      },
+      'NODE_TLS_REJECT_UNAUTHORIZED=0 detected — global TLS validation is disabled; webhook deliveries still enforce certificate validation'
+    );
+  }
+}
 
 function getHttpStatus(error: unknown): number | undefined {
   if (!error || typeof error !== 'object') return undefined;
@@ -142,6 +168,7 @@ export class NotificationService {
         const response = await axios.post(this.config.webhookUrl, payload, {
           timeout: 5_000,
           maxRedirects: 0,
+          httpsAgent: webhookHttpsAgent,
         });
         end({ status_code: String(response.status) });
         notificationSentTotal.inc({ contract_id: this.config.contractId });

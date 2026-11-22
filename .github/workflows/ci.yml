@@ -164,6 +164,28 @@ jobs:
         run: docker compose version || (sudo apt-get update && sudo apt-get install -y docker-compose-plugin)
       - name: Validate Docker Compose config
         run: docker compose config --quiet
+      - name: Reject disabled TLS verification (NODE_TLS_REJECT_UNAUTHORIZED)
+        run: |
+          set -euo pipefail
+          # Setting NODE_TLS_REJECT_UNAUTHORIZED=0 disables TLS certificate
+          # validation for all outgoing Node.js requests (including webhooks).
+          # It must never be baked into images or compose files.
+          files=("Dockerfile" "backend/Dockerfile" "docker-compose.yml")
+          found=0
+          for f in "${files[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "Skipping $f (not present)"
+              continue
+            fi
+            if grep -nE 'NODE_TLS_REJECT_UNAUTHORIZED' "$f"; then
+              echo "Error: $f sets NODE_TLS_REJECT_UNAUTHORIZED, which disables TLS certificate validation."
+              found=1
+            fi
+          done
+          if [ "$found" -ne 0 ]; then
+            exit 1
+          fi
+          echo "No NODE_TLS_REJECT_UNAUTHORIZED overrides found."
 
   license-check:
     name: License Compliance
