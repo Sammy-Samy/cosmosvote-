@@ -367,14 +367,44 @@ fn test_undelegate_without_delegation_fails() {
     assert_eq!(result, Err(Ok(ContractError::NotDelegating)));
 }
 
+/// Passing an empty `delegators` vec is valid and returns only the voter's own
+/// balance (no delegated weight is added). This documents the empty-list
+/// behaviour explicitly so callers do not mistake it for an error case.
 #[test]
-fn test_get_delegated_weight_no_delegators() {
+fn test_get_delegated_weight_empty_delegators_returns_own_balance() {
     let env = Env::default();
     let (token, admin, user) = setup(&env);
     token.transfer(&admin, &user, &5_000_000i128);
 
+    let own_balance = token.balance(&user);
+    assert_eq!(own_balance, 5_000_000);
+
     let weight = token.get_delegated_weight(&user, &soroban_sdk::Vec::new(&env));
-    assert_eq!(weight, 5_000_000);
+    assert_eq!(weight, own_balance);
+}
+
+/// Companion to the empty-list test: with a non-empty `delegators` vec the
+/// result must be the voter's own balance plus the balances of all delegators
+/// that actually delegate to the voter.
+#[test]
+fn test_get_delegated_weight_non_empty_delegators_sums_correctly() {
+    let env = Env::default();
+    let (token, admin, user) = setup(&env);
+    let delegator_a = Address::generate(&env);
+    let delegator_b = Address::generate(&env);
+
+    token.transfer(&admin, &user, &5_000_000i128);
+    token.mint(&admin, &delegator_a, &2_000_000i128);
+    token.mint(&admin, &delegator_b, &1_000_000i128);
+    token.delegate(&delegator_a, &user);
+    token.delegate(&delegator_b, &user);
+
+    let mut delegators = soroban_sdk::Vec::new(&env);
+    delegators.push_back(delegator_a);
+    delegators.push_back(delegator_b);
+
+    let weight = token.get_delegated_weight(&user, &delegators);
+    assert_eq!(weight, 8_000_000); // 5M own + 2M + 1M delegated
 }
 
 #[test]

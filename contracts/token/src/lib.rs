@@ -363,6 +363,16 @@ impl TokenContract {
     /// of all `delegators` who have delegated to them.
     ///
     /// Governance calls this with the list returned by `get_delegators`.
+    ///
+    /// # Empty `delegators` list
+    /// Passing an empty `delegators` vec is valid and returns **only the voter's
+    /// own balance** — no delegated weight is added. This is intentional (a voter
+    /// with no delegators has weight equal to their own balance), but it means a
+    /// caller that accidentally passes an empty list will silently receive a
+    /// lower-than-expected weight rather than an error.
+    ///
+    /// Callers should pass the list returned by [`get_delegators`] for the same
+    /// `voter` to avoid silently getting unexpected weight.
     pub fn get_delegated_weight(env: Env, voter: Address, delegators: soroban_sdk::Vec<Address>) -> i128 {
         let mut weight = TokenStorage::balance(&env, &voter);
         for delegator in delegators.iter() {

@@ -71,22 +71,26 @@ Soroban persistent storage entries carry a TTL that decrements each ledger. If a
 
 | Key | TTL (ledgers) | Rationale |
 |-----|--------------|-----------|
-| `Proposal(id)` | 518 400 (~30 days at 5 s/ledger) | Covers max voting duration (2 592 000 s) plus buffer |
+| `Proposal(id)` | `end_time + 30 days` worth of ledgers (min. 518 400 ≈ 30 days) | Covers the full voting window plus a 30-day post-vote buffer |
 | `HasVoted(id, voter)` | 518 400 | Vote guards must outlive the proposal |
 | `VoteRecord(id, voter)` | 518 400 | Vote records must outlive the proposal |
 | `LastProposal(proposer)` | 120 960 (~7 days) | Only needs to cover the cooldown window |
+
+### Proposal TTL Renewal Policy
+
+Active proposals may span voting periods of up to 30 days. To guarantee that the `Proposal(id)` persistent entry never expires mid-vote, both `cast_vote` and `finalise` renew its TTL to **at least `end_time + 30 days` worth of ledgers**. The target is computed from the proposal's `end_time` (converted to a ledger count using the ~5 s/ledger assumption) plus a 30-day buffer, and is floored at `PROPOSAL_TTL_LEDGERS` (518 400 ledgers ≈ 30 days) so that short proposals still receive a healthy minimum TTL.
 
 ### TTL Refresh in cast_vote
 
 Every call to `cast_vote` refreshes the TTL for:
 
-1. **`Proposal(id)`** — via `GovernanceStorage::set_proposal()` after tallying the vote weight. TTL is bumped to `PROPOSAL_TTL_LEDGERS` (518 400 ledgers ≈ 30 days).
+1. **`Proposal(id)`** — via `GovernanceStorage::set_proposal()` after tallying the vote weight. TTL is bumped to at least `end_time + 30 days` worth of ledgers (never below `PROPOSAL_TTL_LEDGERS`, 518 400 ledgers ≈ 30 days).
 2. **`HasVoted(id, voter)`** — via `GovernanceStorage::set_has_voted()` after recording the vote. TTL bumped to `VOTE_TTL_LEDGERS` (518 400 ledgers).
 3. **`VoteRecord(id, voter)`** — via `GovernanceStorage::set_vote_record()` after recording vote details. TTL bumped to `VOTE_TTL_LEDGERS`.
 
 ### TTL Refresh in finalise
 
-`finalise()` writes the updated `Proposal` state (Passed/Rejected) via `GovernanceStorage::set_proposal()`, which bumps the **`Proposal(id)`** TTL to `PROPOSAL_TTL_LEDGERS`. This ensures the final proposal state remains readable long after voting ends.
+`finalise()` writes the updated `Proposal` state (Passed/Rejected) via `GovernanceStorage::set_proposal()`, which renews the **`Proposal(id)`** TTL to at least `end_time + 30 days` worth of ledgers (floored at `PROPOSAL_TTL_LEDGERS`). This ensures the final proposal state remains readable long after voting ends.
 
 ### Implementation Details
 
@@ -100,8 +104,25 @@ fn bump_persistent_ttl(env: &Env, key: &PersistentKey) {
 }
 ```
 
+For `Proposal(id)`, the bump amount is derived from the proposal's `end_time` so the entry lives for at least `end_time + 30 days` worth of ledgers:
+
+```rust
+// ~5 s per ledger => 12 ledgers per minute, 17 280 ledgers per day
+const LEDGERS_PER_DAY: u32 = 17_280;
+const PROPOSAL_TTL_BUFFER_DAYS: u32 = 30;
+
+let now = env.ledger().timestamp();
+let remaining_secs = proposal.end_time.saturating_sub(now);
+let remaining_ledgers = remaining_secs / 5;
+let target = remaining_ledgers
+    .saturating_add(PROPOSAL_TTL_BUFFER_DAYS * LEDGERS_PER_DAY)
+    .max(Self::PROPOSAL_TTL_LEDGERS);
+```
+
 - `PERSISTENT_THRESHOLD` = 17 280 ledgers (~1 day): only bump if the remaining TTL falls below this threshold, avoiding unnecessary fee payments when TTL is still healthy.
-- `PERSISTENT_BUMP_AMOUNT` = 518 400 ledgers (~30 days): the target TTL after bumping.
+- `PERSISTENT_BUMP_AMOUNT` = 518 400 ledgers (~30 days): the default target TTL after bumping.
+- `PROPOSAL_TTL_LEDGERS` = 518 400 ledgers (~30 days): the minimum TTL applied to `Proposal(id)`; the actual bump is `max(end_time + 30 days, PROPOSAL_TTL_LEDGERS)`.
+- Ledger-time assumption: **~5 seconds per ledger**, so 30 days ≈ 518 400 ledgers and 1 day ≈ 17 280 ledgers.
 
 ### Assumptions
 

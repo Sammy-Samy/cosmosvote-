@@ -527,6 +527,7 @@ impl GovernanceContract {
 
         proposal.voter_count += 1;
         GovernanceStorage::set_proposal(&env, proposal_id, &proposal);
+        GovernanceStorage::bump_proposal_ttl(&env, proposal_id, proposal.end_time);
 
         GovernanceEvents::vote_cast(&env, proposal_id, &voter, &vote, weight);
         Ok(())
@@ -710,6 +711,7 @@ impl GovernanceContract {
         }
 
         GovernanceStorage::set_proposal(&env, proposal_id, &proposal);
+        GovernanceStorage::bump_proposal_ttl(&env, proposal_id, proposal.end_time);
         let active_count = GovernanceStorage::active_proposal_count(&env);
         if active_count > 0 {
             GovernanceStorage::set_active_proposal_count(&env, active_count - 1);
