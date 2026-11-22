@@ -317,6 +317,14 @@ updated stuff
 - Test both success and failure paths for every public function
 - **Coverage Target:** All contributions must maintain at least **80% code coverage**. The CI will fail if coverage drops below this threshold.
 
+## Postmortems
+
+When an incident occurs (e.g. a production outage, a failed deployment, or a security-relevant event), a postmortem is written after the incident is resolved.
+
+- **Process:** See [docs/runbook.md](docs/runbook.md) for when a postmortem is required, who approves it, and where it is published.
+- **Template:** Start from [docs/postmortem-template.md](docs/postmortem-template.md), which includes sections for the timeline, contributing factors, and action items.
+- **Action items:** Every action item from a postmortem is tracked as a GitHub issue with the `postmortem` label so it can be prioritized and followed up.
+
 ## Security
 
 If you discover a security vulnerability, **do not open a public issue**. See [SECURITY.md](./SECURITY.md) for responsible disclosure.

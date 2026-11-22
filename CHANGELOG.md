@@ -95,7 +95,21 @@ The commit type maps directly to a changelog category:
 
 ### Releasing a version
 
-When cutting a release:
+Releases are cut **automatically** by [`.github/workflows/release.yml`](.github/workflows/release.yml) when a PR is merged to `main` and CI passes. No manual tagging is required.
+
+How the automated release works:
+
+1. **Version derivation** — the next [SemVer](https://semver.org/) version is computed from the conventional commit types / PR titles merged since the last release (`feat` → minor, `fix`/`refactor`/`security` → patch, `feat!` / `BREAKING CHANGE` → major).
+2. **Changelog generation** — entries under the new version heading are generated from the PR titles since the last release and prepended above `[Unreleased]`, together with the comparison link at the bottom of this file.
+3. **Tag and GitHub Release** — a `vX.Y.Z` git tag and a matching GitHub Release are created automatically on the release commit.
+4. **Version embedding** — the version is embedded in the WASM build metadata and exposed by the backend `/version` endpoint, so a deployed artifact can always be traced back to its release.
+
+Because of this, contributors only need to keep `[Unreleased]` accurate; the release workflow handles renaming, tagging, and linking.
+
+<details>
+<summary>Manual release (fallback only)</summary>
+
+If the automated workflow is unavailable, cut a release by hand:
 
 1. Rename `[Unreleased]` to the new version with today's date:
    ```
@@ -107,6 +121,8 @@ When cutting a release:
    [1.1.0]: https://github.com/mercyJJ/cosmosvote/compare/v1.0.0...v1.1.0
    ```
 4. Tag the release commit: `git tag v1.1.0 && git push --tags`.
+
+</details>
 
 ---
 

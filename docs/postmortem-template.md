@@ -4,6 +4,8 @@ Use this template for every production incident that causes user-visible impact 
 
 > **How to use:** copy this file to `docs/postmortems/YYYY-MM-DD-<slug>.md`, fill in each section, and open a PR for team review. Blameless culture — focus on systems and processes, not individuals.
 >
+> **Action items:** every action item in this postmortem must be filed as a GitHub issue labelled `postmortem` and linked in the Action Items table below. See the postmortem process in [docs/runbook.md](./runbook.md) for details.
+>
 > **Example:** See [docs/postmortems/2024-03-15-rpc-outage.md](./postmortems/2024-03-15-rpc-outage.md) for a fully completed hypothetical postmortem covering an RPC outage incident.
 
 ---
@@ -29,7 +31,7 @@ Use this template for every production incident that causes user-visible impact 
 
 ## Timeline
 
-All times in UTC.
+All times in UTC — convert any local or log timestamps to UTC before filling in this table.
 
 | Time (UTC) | Event |
 |------------|-------|
@@ -60,12 +62,23 @@ All times in UTC.
 4. Why? —
 5. Why? —
 
-### Contributing factors
+---
 
-<!-- List any conditions that made the incident worse or harder to detect. -->
+## Contributing Factors
 
-- 
-- 
+List every condition that made the incident worse, harder to detect, or slower to resolve. Contributing factors are not necessarily root causes — they are the circumstances that shaped the impact and the response.
+
+Consider:
+- **Technical** — missing validation, brittle config, lack of circuit breaker, dependency behaviour
+- **Detection** — gaps in alerting, noisy or missing dashboards, delayed event indexing
+- **Process** — unclear runbook steps, missing escalation path, manual steps prone to error
+- **Knowledge** — undocumented behaviour, single-owner components, assumptions that proved wrong
+
+| # | Contributing factor | Category | Notes |
+|---|---------------------|----------|-------|
+| 1 | | Technical / Detection / Process / Knowledge | |
+| 2 | | Technical / Detection / Process / Knowledge | |
+| 3 | | Technical / Detection / Process / Knowledge | |
 
 ---
 
@@ -84,13 +97,13 @@ All times in UTC.
 
 ## Action Items
 
-Each item must have an owner and a due date.
+Each item must have an owner and a due date, and must be tracked as a GitHub issue labelled `postmortem`. File the issue first, then link it in the table below so the postmortem and the tracking issue stay in sync.
 
-| # | Action | Owner | Due date | Status |
-|---|--------|-------|----------|--------|
-| 1 | | @handle | YYYY-MM-DD | Open |
-| 2 | | @handle | YYYY-MM-DD | Open |
-| 3 | | @handle | YYYY-MM-DD | Open |
+| # | Action | Owner | Due date | GitHub issue | Status |
+|---|--------|-------|----------|--------------|--------|
+| 1 | | @handle | YYYY-MM-DD | #NNN | Open |
+| 2 | | @handle | YYYY-MM-DD | #NNN | Open |
+| 3 | | @handle | YYYY-MM-DD | #NNN | Open |
 
 Action item categories to consider:
 - **Prevent recurrence** — code fix, config change, additional validation

@@ -4,6 +4,25 @@ import { createHealthServer } from './health';
 import { NotificationService } from './notificationService';
 import { logger } from './logger';
 import helmet from 'helmet';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+
+// Resolve the running version. Prefer an explicitly injected version (set by
+// the release workflow at build time), falling back to package.json.
+function resolveVersion(): string {
+  if (process.env.COSMOSVOTE_VERSION) {
+    return process.env.COSMOSVOTE_VERSION;
+  }
+  try {
+    const pkgPath = join(__dirname, '..', 'package.json');
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version?: string };
+    return pkg.version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+const APP_VERSION = resolveVersion();
 
 // Validate env vars before anything else — fails fast with a clear message.
 const env = loadEnv();
@@ -34,9 +53,20 @@ const securityHeaders = helmet({
 });
 
 const healthServer = createHealthServer(() => service.checkReadiness(), securityHeaders);
+
+// Expose the running version so deployments can verify what is live.
+healthServer.on('request', (req, res) => {
+  if (req.method === 'GET' && req.url === '/version') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ version: APP_VERSION }));
+  }
+});
+
 const healthPort = env.HEALTH_PORT;
 healthServer.listen(healthPort, '0.0.0.0', () => {
-  console.info(`[cosmosvote-backend] health endpoints listening on port ${healthPort}`);
+  console.info(
+    `[cosmosvote-backend] health endpoints listening on port ${healthPort} (version ${APP_VERSION})`,
+  );
 });
 
 service.start();

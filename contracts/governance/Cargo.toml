@@ -6,6 +6,11 @@ license = "Apache-2.0"
 description = "CosmosVote governance contract — on-chain proposals and token-weighted voting on Stellar Soroban"
 repository = "https://github.com/mercyJJ/cosmosvote"
 authors = ["mercyJJ <joymercy7879@gmail.com>"]
+# Issue #498: embed the release version in the WASM build metadata. The
+# build script (build.rs) reads COSMOSVOTE_VERSION (falling back to this
+# package version) and exposes it to the contract via env vars so the
+# compiled WASM records the semantic version.
+build = "build.rs"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -40,3 +45,11 @@ serde_json = "1.0"
 
 [features]
 testutils = ["soroban-sdk/testutils"]
+
+# Issue #498: release version metadata. The release workflow sets
+# COSMOSVOTE_VERSION (e.g. "1.2.3") when building the WASM; build.rs
+# propagates it to the contract so the version is embedded in the build
+# metadata and surfaced by the backend /version endpoint.
+[package.metadata.cosmosvote]
+version = "1.0.0"
+version_env = "COSMOSVOTE_VERSION"

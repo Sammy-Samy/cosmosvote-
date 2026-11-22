@@ -8,6 +8,9 @@ on:
       - 'contracts/governance/src/lib.rs'
       - 'contracts/governance/src/test.rs'
 
+env:
+  MUTATION_SCORE_THRESHOLD: '70'
+
 jobs:
   mutants:
     name: cargo-mutants (governance)
@@ -36,6 +39,91 @@ jobs:
             cat mutants-out/missed.txt
           else
             echo "No surviving mutants."
+          fi
+      - name: Enforce mutation score threshold
+        if: always()
+        run: |
+          set -euo pipefail
+
+          THRESHOLD="${MUTATION_SCORE_THRESHOLD}"
+          OUTCOMES="mutants-out/outcomes.json"
+          SCORE_FILE="mutants-out/score.txt"
+
+          if [ ! -f "$OUTCOMES" ]; then
+            echo "::error::Missing $OUTCOMES; cannot compute mutation score."
+            exit 1
+          fi
+
+          # Count mutants by outcome. "caught" mutants are killed by the test
+          # suite; "missed" mutants survive. Timeouts and unviable mutants are
+          # excluded from the score denominator.
+          read -r CAUGHT MISSED TIMEOUT UNVIABLE TOTAL < <(
+            python3 - "$OUTCOMES" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], "r", encoding="utf-8") as fh:
+              data = json.load(fh)
+
+          if isinstance(data, dict):
+              outcomes = data.get("outcomes", [])
+          else:
+              outcomes = data
+
+          caught = missed = timeout = unviable = 0
+          for entry in outcomes:
+              summary = entry.get("summary") if isinstance(entry, dict) else None
+              if summary is None:
+                  summary = entry.get("outcome") if isinstance(entry, dict) else entry
+              summary = str(summary).lower()
+              if summary == "caught":
+                  caught += 1
+              elif summary == "missed":
+                  missed += 1
+              elif summary == "timeout":
+                  timeout += 1
+              elif summary == "unviable":
+                  unviable += 1
+
+          total = caught + missed
+          print(caught, missed, timeout, unviable, total)
+          PY
+          )
+
+          echo "Caught mutants:   ${CAUGHT}"
+          echo "Missed mutants:   ${MISSED}"
+          echo "Timeout mutants:  ${TIMEOUT}"
+          echo "Unviable mutants: ${UNVIABLE}"
+          echo "Scored mutants:   ${TOTAL}"
+
+          if [ "${TOTAL}" -eq 0 ]; then
+            echo "::error::No scorable mutants found; cannot compute mutation score."
+            exit 1
+          fi
+
+          SCORE=$(python3 -c "print(f'{(${CAUGHT} / ${TOTAL}) * 100:.2f}')")
+          echo "Mutation score:   ${SCORE}% (threshold: ${THRESHOLD}%)"
+
+          {
+            echo "mutation_score=${SCORE}"
+            echo "threshold=${THRESHOLD}"
+            echo "caught=${CAUGHT}"
+            echo "missed=${MISSED}"
+            echo "timeout=${TIMEOUT}"
+            echo "unviable=${UNVIABLE}"
+            echo "scored=${TOTAL}"
+            echo "commit=${GITHUB_SHA}"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > "$SCORE_FILE"
+
+          cat "$SCORE_FILE"
+
+          if python3 -c "import sys; sys.exit(0 if ${SCORE} >= ${THRESHOLD} else 1)"; then
+            echo "::notice::Mutation score ${SCORE}% meets threshold ${THRESHOLD}%."
+          else
+            echo "::error::Mutation score ${SCORE}% is below threshold ${THRESHOLD}%."
+            exit 1
           fi
       - name: Upload mutants report
         if: always()

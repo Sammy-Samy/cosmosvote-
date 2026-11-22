@@ -2,11 +2,17 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*.*.*" # .
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -14,6 +20,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
@@ -24,7 +33,154 @@ jobs:
       - name: Run tests
         run: cargo test --all --features testutils
 
+      - name: Determine version
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Latest semantic version tag (vX.Y.Z), if any.
+          LAST_TAG=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1 || true)
+          if [ -z "$LAST_TAG" ]; then
+            LAST_TAG="v0.0.0"
+          fi
+          echo "last_tag=$LAST_TAG" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            # Tag push: validate the tag format and use it as-is.
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
+            if ! printf '%s' "$TAG_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "Error: Tag '$GITHUB_REF_NAME' is not a valid semantic version (expected vX.Y.Z)"
+              exit 1
+            fi
+            echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "create_tag=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Branch push: compute the next version from PR titles since the last tag.
+          BASE_VERSION="${LAST_TAG#v}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE_VERSION"
+
+          RANGE="$LAST_TAG..HEAD"
+          if [ "$LAST_TAG" = "v0.0.0" ]; then
+            RANGE="HEAD"
+          fi
+
+          # Collect PR titles merged since the last release (fall back to commit subjects).
+          PR_TITLES=$(gh pr list --state merged --base main --limit 200 \
+            --json title,mergedAt \
+            --jq '.[] | select(.mergedAt != null) | .title' 2>/dev/null || true)
+          if [ -z "$PR_TITLES" ]; then
+            PR_TITLES=$(git log "$RANGE" --pretty=format:%s 2>/dev/null || true)
+          fi
+
+          BUMP="patch"
+          if printf '%s\n' "$PR_TITLES" | grep -Eq '(^|[^a-zA-Z])(BREAKING CHANGE|breaking change|!:)' \
+             || printf '%s\n' "$PR_TITLES" | grep -Eq '^[a-zA-Z]+(\([^)]*\))?!:'; then
+            BUMP="major"
+          elif printf '%s\n' "$PR_TITLES" | grep -Eq '^feat(\([^)]*\))?:'; then
+            BUMP="minor"
+          fi
+
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+
+          NEW_VERSION="$MAJOR.$MINOR.$PATCH"
+          echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "create_tag=true" >> "$GITHUB_OUTPUT"
+          echo "Next version: v$NEW_VERSION ($BUMP bump from $LAST_TAG)"
+
+      - name: Update CHANGELOG.md
+        if: steps.version.outputs.create_tag == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ steps.version.outputs.version }}
+          LAST_TAG: ${{ steps.version.outputs.last_tag }}
+        run: |
+          set -euo pipefail
+
+          RANGE="$LAST_TAG..HEAD"
+          if [ "$LAST_TAG" = "v0.0.0" ]; then
+            RANGE="HEAD"
+          fi
+
+          PR_TITLES=$(gh pr list --state merged --base main --limit 200 \
+            --json title,number,mergedAt \
+            --jq '.[] | select(.mergedAt != null) | "- \(.title) (#\(.number))"' 2>/dev/null || true)
+          if [ -z "$PR_TITLES" ]; then
+            PR_TITLES=$(git log "$RANGE" --pretty=format:'- %s' 2>/dev/null || true)
+          fi
+
+          DATE=$(date -u +%Y-%m-%d)
+          ENTRY_FILE=$(mktemp)
+          {
+            echo "## [$NEW_VERSION] - $DATE"
+            echo ""
+            echo "$PR_TITLES"
+            echo ""
+          } > "$ENTRY_FILE"
+
+          if [ -f CHANGELOG.md ]; then
+            # Insert the new entry after the top-level title (first heading line).
+            awk -v entryfile="$ENTRY_FILE" '
+              BEGIN { inserted = 0 }
+              {
+                print
+                if (!inserted && $0 ~ /^# /) {
+                  print ""
+                  while ((getline line < entryfile) > 0) print line
+                  close(entryfile)
+                  inserted = 1
+                }
+              }
+              END {
+                if (!inserted) {
+                  while ((getline line < entryfile) > 0) print line
+                  close(entryfile)
+                }
+              }
+            ' CHANGELOG.md > CHANGELOG.md.new
+            mv CHANGELOG.md.new CHANGELOG.md
+          else
+            {
+              echo "# Changelog"
+              echo ""
+              cat "$ENTRY_FILE"
+            } > CHANGELOG.md
+          fi
+
+          rm -f "$ENTRY_FILE"
+          cat CHANGELOG.md
+
+      - name: Commit CHANGELOG and create tag
+        if: steps.version.outputs.create_tag == 'true'
+        env:
+          NEW_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          if git diff --cached --quiet; then
+            echo "No changelog changes to commit"
+          else
+            git commit -m "chore(release): $NEW_TAG [skip ci]"
+            git push origin HEAD:main
+          fi
+          git tag -a "$NEW_TAG" -m "Release $NEW_TAG"
+          git push origin "$NEW_TAG"
+
       - name: Build WASM binaries
+        env:
+          COSMOSVOTE_VERSION: ${{ steps.version.outputs.version }}
         run: cargo build --release --target wasm32-unknown-unknown
 
       - name: Prepare release artifacts
@@ -36,25 +192,11 @@ jobs:
           sha256sum *.wasm > checksums.sha256
           cat checksums.sha256
 
-      - name: Extract version from Cargo.toml
-        id: cargo_version
-        run: |
-          VERSION=$(grep '^version =' contracts/governance/Cargo.toml | cut -d '"' -f 2)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Verify tag matches version
-        run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          CARGO_VERSION="${{ steps.cargo_version.outputs.version }}"
-          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
-            echo "Error: Tag version ($TAG_VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
-            exit 1
-          fi
-
       - name: Extract changelog entry
         id: changelog
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
           # Extract notes between the version header and the next header
           NOTES=$(sed -n "/## \[$VERSION\]/,/## \[/p" CHANGELOG.md | sed '1d;$d')
           echo "notes<<EOF" >> "$GITHUB_OUTPUT"
@@ -64,7 +206,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
-          name: Release v${{ steps.cargo_version.outputs.version }}
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Release v${{ steps.version.outputs.version }}
           body: ${{ steps.changelog.outputs.notes }}
           files: |
             release/cosmosvote_governance.wasm

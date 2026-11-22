@@ -223,15 +223,53 @@ For the full error reference see [docs/errors.md](./errors.md).
 
 ## Post-Incident Procedure
 
-After any incident that causes user-visible impact or requires an emergency response, open a postmortem within 48 hours of resolution.
+### When to write a postmortem
 
-1. Copy the template: `cp docs/postmortem-template.md docs/postmortems/YYYY-MM-DD-<slug>.md`
-2. Fill in all sections (timeline, root cause, impact, action items, lessons learned)
-3. Open a PR for team review
-4. Track action items to completion
+A postmortem is **required** for any incident that:
+
+- causes user-visible impact (failed votes, unreadable proposals, stalled finalization), or
+- requires an emergency response (pause, key rotation, contract redeploy, RPC failover), or
+- is classified P0 or P1 under the [SLA targets](#incident-response) above.
+
+The postmortem must be opened **within 48 hours of resolution** (not of detection). P2 incidents with no user-visible impact may be documented as a comment on the tracking issue instead, at the on-call maintainer's discretion.
+
+### Who writes and approves
+
+| Role | Responsibility |
+|------|----------------|
+| **Incident commander** (the on-call maintainer who led the response) | Drafts the postmortem and opens the PR. |
+| **Team** | Reviews the draft via pull request; comments on timeline accuracy, contributing factors, and action items. |
+| **Maintainer / on-call lead** | Approves and merges the PR. A postmortem is not "published" until it is merged to `main`. |
+
+The review is blameless: focus on systems and process, never on individuals.
+
+### Where it is published
+
+1. Copy the template and fill in every section:
+   ```bash
+   cp docs/postmortem-template.md docs/postmortems/YYYY-MM-DD-<slug>.md
+   ```
+   Use the incident date (`YYYY-MM-DD`) and a short kebab-case slug, e.g. `2024-03-15-rpc-outage.md`.
+2. Open a PR that adds the file. The PR description must link the postmortem and the originating incident issue.
+3. After merge, link the postmortem from the incident issue and close the issue.
 
 See [docs/postmortem-template.md](./postmortem-template.md) for the full template and guidance.
 For a completed example (hypothetical RPC outage), see [docs/postmortems/2024-03-15-rpc-outage.md](./postmortems/2024-03-15-rpc-outage.md).
+
+### Tracking action items
+
+Every action item in the postmortem becomes a **GitHub issue**:
+
+- Apply the `postmortem` label to each issue.
+- Link the issue back to the postmortem doc (in the issue body) and link the issue from the postmortem's Action Items table.
+- Assign an **owner** and a **due date** to every issue — no action item is accepted without both.
+- Track the issues to completion; the incident commander reviews open `postmortem` issues at the next team sync.
+
+The `postmortem` label must exist in the repository. Create it once via **GitHub → Issues → Labels → New label** (name: `postmortem`, colour of your choice), or from the CLI:
+
+```bash
+gh label create postmortem --description "Action items and follow-ups from incident postmortems" --color FBCA04
+```
 
 ---
 
