@@ -575,6 +575,7 @@ Emitted when the token admin is changed.
 | gov | admin_transfer_proposed | `gov`, `propose` | current_admin, pending_admin, timestamp |
 | gov | admin_transfer_accepted | `gov`, `accept` | previous_admin, new_admin, timestamp |
 | gov | admin_transferred | `gov`, `admin` | old_admin, new_admin |
+| gov | voting_token_updated | `gov`, `token` | old_token, new_token, admin |
 | gov | paused | `gov`, `paused` | admin |
 | gov | unpaused | `gov`, `unpause` | admin |
 | gov | proposal_cooldown_updated | `gov`, `cooldown` | admin, old_value, new_value |

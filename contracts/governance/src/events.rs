@@ -199,10 +199,19 @@ impl GovernanceEvents {
         );
     }
 
-    pub fn voting_token_updated(env: &Env, old_token: &Address, new_token: &Address) {
+    /// Emitted by `update_voting_token` when the admin changes the token used
+    /// for vote-weight calculation.
+    ///
+    /// Fields: `(old_token, new_token, admin)`
+    pub fn voting_token_updated(
+        env: &Env,
+        old_token: &Address,
+        new_token: &Address,
+        admin: &Address,
+    ) {
         env.events().publish(
             (symbol_short!("gov"), symbol_short!("token")),
-            (old_token.clone(), new_token.clone()),
+            (old_token.clone(), new_token.clone(), admin.clone()),
         );
     }
 

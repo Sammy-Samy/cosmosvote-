@@ -107,6 +107,20 @@ impl GovernanceContract {
     /// voter roll at 10 000 to ensure any such extension stays within a safe
     /// instruction budget. See `docs/gas-budgeting.md` for measurements.
     pub const MAX_VOTER_COUNT: u32 = 10_000;
+
+    /// Default maximum number of simultaneously active proposals.
+    ///
+    /// Used when the limit configured at initialization is `0`. Caps the number
+    /// of proposals in `Active` state to bound storage growth and keep read
+    /// performance predictable.
+    pub const MAX_ACTIVE_PROPOSALS: u32 = 100;
+
+    /// Maximum number of choices allowed in a multi-choice proposal.
+    pub const MAX_CHOICES: u32 = 10;
+
+    /// Maximum length (in bytes) of a single choice string.
+    pub const MAX_CHOICE_LEN: u32 = 64;
+
     // -----------------------------------------------------------------------
     // Initialization
     // -----------------------------------------------------------------------
@@ -122,6 +136,8 @@ impl GovernanceContract {
     /// * `treasury`                    – optional treasury contract address
     /// * `concentration_threshold_bps` – circuit breaker threshold in basis points
     ///                                   (e.g. 5000 = 50%). 0 disables the circuit breaker.
+    /// * `max_active_proposals`        – maximum number of simultaneously active
+    ///                                   proposals (0 = default `MAX_ACTIVE_PROPOSALS`).
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -132,6 +148,7 @@ impl GovernanceContract {
         restrict_admin_vote: bool,
         treasury: Option<Address>,
         concentration_threshold_bps: u32,
+        max_active_proposals: u32,
     ) -> Result<(), ContractError> {
         if GovernanceStorage::contract_state(&env) != ContractState::Uninitialized {
             return Err(ContractError::AlreadyInitialized);
@@ -151,6 +168,7 @@ impl GovernanceContract {
         GovernanceStorage::set_contract_state(&env, ContractState::Ready);
         GovernanceStorage::set_version(&env, (1, 0, 0));
         GovernanceStorage::set_concentration_threshold_bps(&env, concentration_threshold_bps);
+        GovernanceStorage::set_max_active_proposals(&env, max_active_proposals);
 
         GovernanceEvents::initialized(&env, &admin, &voting_token);
         Ok(())
@@ -188,6 +206,7 @@ impl GovernanceContract {
         duration: u64,
         link: Option<String>,
         treasury_action: Option<TreasuryAction>,
+        choices: Vec<String>,
     ) -> Result<u64, ContractError> {
         proposer.require_auth();
         Self::assert_ready(&env)?;
@@ -211,9 +230,27 @@ impl GovernanceContract {
             return Err(ContractError::InvalidDurationRange);
         }
 
-        // Global rate limit: max 50 active proposals
+        // Multi-choice validation (issue #448)
+        if !choices.is_empty() {
+            if choices.len() < 2 {
+                return Err(ContractError::TooFewChoices);
+            }
+            if choices.len() > Self::MAX_CHOICES {
+                return Err(ContractError::TooManyChoices);
+            }
+            for i in 0..choices.len() {
+                let choice = choices.get(i).unwrap();
+                if choice.len() == 0 || choice.len() > Self::MAX_CHOICE_LEN {
+                    return Err(ContractError::InvalidChoiceLength);
+                }
+            }
+        }
+
+        // Global rate limit: configurable max active proposals (issue #447)
+        let max_active = GovernanceStorage::max_active_proposals(&env);
+        let max_active = if max_active == 0 { Self::MAX_ACTIVE_PROPOSALS } else { max_active };
         let active_count = GovernanceStorage::active_proposal_count(&env);
-        if active_count >= 50 {
+        if active_count >= max_active {
             return Err(ContractError::ProposalsStillActive);
         }
 
@@ -289,7 +326,7 @@ impl GovernanceContract {
                 Some(a) => Vec::from_array(&env, [a]),
                 None => Vec::new(&env),
             },
-            choices: Vec::new(&env),
+            choices,
             winning_choice: None,
             cancellation_reason: None,
         };
@@ -569,6 +606,17 @@ impl GovernanceContract {
     ) -> Result<VoteRecord, ContractError> {
         GovernanceStorage::vote_record(&env, proposal_id, &voter)
             .ok_or(ContractError::VoteNotFound)
+    }
+
+    /// Retrieve the vote record for a voter on a proposal, if any.
+    ///
+    /// Returns `None` when the voter has not voted on the proposal.
+    pub fn get_vote_record(
+        env: Env,
+        proposal_id: u64,
+        voter: Address,
+    ) -> Option<VoteRecord> {
+        GovernanceStorage::vote_record(&env, proposal_id, &voter)
     }
 
     /// Retract a previously cast vote on an active proposal.
@@ -948,7 +996,7 @@ impl GovernanceContract {
 
         let old_token = GovernanceStorage::voting_token(&env);
         GovernanceStorage::set_voting_token(&env, &new_token);
-        GovernanceEvents::voting_token_updated(&env, &old_token, &new_token);
+        GovernanceEvents::voting_token_updated(&env, &old_token, &new_token, &admin);
         Ok(())
     }
 
