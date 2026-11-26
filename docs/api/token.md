@@ -329,6 +329,49 @@ Transfers admin privileges immediately to `new_admin`. Admin only.
 
 ---
 
+## `get_delegated_weight`
+
+```rust
+pub fn get_delegated_weight(
+    env: Env,
+    voter: Address,
+    delegators: Vec<Address>,
+) -> i128
+```
+
+**Returns:** The total voting weight of `voter`, computed as the voter's own balance plus the balances of every address in `delegators`.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `voter` | `Address` | Address whose own balance is always included |
+| `delegators` | `Vec<Address>` | Addresses that have delegated their weight to `voter` |
+
+**Empty `delegators` behaviour**
+
+If `delegators` is empty, the function returns **only the voter's own balance** — it does not error. This is intentional (a voter with no delegators still has their own weight), but it means a caller that accidentally passes an empty list will silently receive a smaller weight than expected. Callers should always source the list from the governance contract's `get_delegators(voter)` rather than constructing it manually.
+
+**Delegation semantics**
+
+- Delegation is **one level deep**: only the direct delegators in the supplied list contribute. If a delegator has itself received delegations, those second-level weights are **not** included.
+- Each address in `delegators` contributes its current token balance at call time; no snapshotting is performed.
+- Duplicate entries in `delegators` are counted multiple times, so callers must pass a de-duplicated list (as returned by `get_delegators`).
+- The `voter` address should not appear in `delegators`; doing so would double-count the voter's own balance.
+
+**Example**
+
+```rust
+// Correct: use the governance contract as the source of truth
+let delegators = governance.get_delegators(&voter);
+let weight = token.get_delegated_weight(&voter, &delegators);
+
+// Empty list: returns voter's own balance only
+let own_weight = token.get_delegated_weight(&voter, &Vec::new(&env));
+```
+
+---
+
 ## Error Code Reference
 
 | Code | Name | Description |

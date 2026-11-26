@@ -129,8 +129,66 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Run instruction count benchmarks
-        run: cargo test bench_ --features testutils -- --nocapture
+      - name: Run instruction count benchmarks (wasm32 target)
+        run: |
+          set -euo pipefail
+          cargo test bench_ --features testutils --target wasm32-unknown-unknown -- --nocapture \
+            | tee benchmark_output.txt
+      - name: Enforce per-function instruction count baseline (10% gate)
+        run: |
+          set -euo pipefail
+          BASELINE_FILE="wasm_size_baseline.txt"
+          if [ ! -f "$BASELINE_FILE" ]; then
+            echo "Error: $BASELINE_FILE not found"
+            exit 1
+          fi
+          if [ ! -f benchmark_output.txt ]; then
+            echo "Error: benchmark_output.txt not found; benchmarks did not run"
+            exit 1
+          fi
+          # Baseline lines use the format: BENCH <function> <instructions>
+          declare -A baseline
+          while read -r tag func instructions _; do
+            if [ "$tag" = "BENCH" ] && [ -n "${func:-}" ] && [ -n "${instructions:-}" ]; then
+              baseline["$func"]="$instructions"
+            fi
+          done < "$BASELINE_FILE"
+          if [ "${#baseline[@]}" -eq 0 ]; then
+            echo "Error: no per-function baselines found in $BASELINE_FILE"
+            exit 1
+          fi
+          declare -A measured
+          while read -r tag func instructions _; do
+            if [ "$tag" = "BENCH" ] && [ -n "${func:-}" ] && [ -n "${instructions:-}" ]; then
+              measured["$func"]="$instructions"
+            fi
+          done < benchmark_output.txt
+          if [ "${#measured[@]}" -eq 0 ]; then
+            echo "Error: no BENCH results captured from benchmark run"
+            exit 1
+          fi
+          failed=0
+          for func in "${!baseline[@]}"; do
+            base="${baseline[$func]}"
+            if [ -z "${measured[$func]:-}" ]; then
+              echo "Error: no benchmark result for $func (baseline: $base instructions)"
+              failed=1
+              continue
+            fi
+            actual="${measured[$func]}"
+            limit=$(( base + base / 10 ))
+            if [ "$actual" -gt "$limit" ]; then
+              echo "Regression: $func used $actual instructions, baseline $base (limit $limit, >10% over)"
+              failed=1
+            else
+              echo "OK: $func used $actual instructions (baseline $base, limit $limit)"
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "Error: one or more functions exceeded their instruction count baseline by more than 10%"
+            exit 1
+          fi
+          echo "All benchmarked functions are within 10% of their baselines."
 
   build:
     name: Build WASM

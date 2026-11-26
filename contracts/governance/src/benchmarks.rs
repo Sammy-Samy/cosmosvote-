@@ -60,7 +60,15 @@ fn maybe_update_baseline(op: &str, instructions: u64) -> bool {
 /// Assert the measured instruction count is within 10% of the baseline for
 /// `op`, unless BENCH_UPDATE=1 is set (in which case the baseline is
 /// refreshed instead of asserted against).
+///
+/// Always emits a stable, machine-readable line `BENCH <function> <instructions>`
+/// so CI can parse per-function instruction counts and compare them against
+/// `wasm_size_baseline.txt`.
 fn check_against_baseline(op: &str, instructions: u64) {
+    // Emit the machine-readable result line first, so it is captured even if
+    // the assertion below fails.
+    println!("BENCH {op} {instructions}");
+
     if maybe_update_baseline(op, instructions) {
         return;
     }
@@ -103,6 +111,18 @@ fn setup_env() -> (Env, GovernanceContractClient<'static>, TokenContractClient<'
 
 fn threshold(baseline: u64) -> u64 {
     baseline + (baseline / 10)
+}
+
+/// Measure the CPU instruction cost of a single contract invocation and
+/// check it against the committed baseline for `op`.
+fn measure<F: FnOnce()>(env: &Env, gov: &GovernanceContractClient, op: &str, f: F) {
+    env.as_contract(&gov.address, || {
+        env.budget().reset_unlimited();
+    });
+    let instructions_before = env.budget().cpu_instruction_cost();
+    f();
+    let instructions = env.budget().cpu_instruction_cost() - instructions_before;
+    check_against_baseline(op, instructions);
 }
 
 #[test]
@@ -235,4 +255,207 @@ fn bench_finalise() {
     let instructions = env.budget().cpu_instruction_cost() - instructions_before;
 
     check_against_baseline("finalise", instructions);
+}
+
+#[test]
+fn bench_retract_vote() {
+    let (env, gov, token, admin, proposer) = setup_env();
+
+    let id = gov.create_proposal(
+        &proposer,
+        &String::from_str(&env, "Retract Benchmark"),
+        &String::from_str(&env, "Measuring instruction count for retract_vote"),
+        &1_000_000i128,
+        &604_800u64,
+        &None,
+        &None,
+    );
+
+    let voter = Address::generate(&env);
+    token.mint(&admin, &voter, &1_000i128);
+    gov.cast_vote(&voter, &id, &Vote::Yes);
+
+    measure(&env, &gov, "retract_vote", || {
+        gov.retract_vote(&voter, &id);
+    });
+}
+
+#[test]
+fn bench_cancel() {
+    let (env, gov, _token, _admin, proposer) = setup_env();
+
+    let id = gov.create_proposal(
+        &proposer,
+        &String::from_str(&env, "Cancel Benchmark"),
+        &String::from_str(&env, "Measuring instruction count for cancel"),
+        &1_000_000i128,
+        &604_800u64,
+        &None,
+        &None,
+    );
+
+    measure(&env, &gov, "cancel", || {
+        gov.cancel(&proposer, &id);
+    });
+}
+
+#[test]
+fn bench_execute() {
+    let (env, gov, token, admin, proposer) = setup_env();
+
+    let id = gov.create_proposal(
+        &proposer,
+        &String::from_str(&env, "Execute Benchmark"),
+        &String::from_str(&env, "Measuring instruction count for execute"),
+        &1_000i128,
+        &3600u64,
+        &None,
+        &None,
+    );
+
+    let voter = Address::generate(&env);
+    token.mint(&admin, &voter, &1_000i128);
+    gov.cast_vote(&voter, &id, &Vote::Yes);
+
+    let end_time = gov.get_proposal(&id).end_time;
+    env.ledger().with_mut(|l| l.timestamp = end_time + 1);
+    gov.finalise(&id);
+
+    measure(&env, &gov, "execute", || {
+        gov.execute(&id);
+    });
+}
+
+#[test]
+fn bench_get_proposal() {
+    let (env, gov, _token, _admin, proposer) = setup_env();
+
+    let id = gov.create_proposal(
+        &proposer,
+        &String::from_str(&env, "Get Proposal Benchmark"),
+        &String::from_str(&env, "Measuring instruction count for get_proposal"),
+        &1_000_000i128,
+        &604_800u64,
+        &None,
+        &None,
+    );
+
+    measure(&env, &gov, "get_proposal", || {
+        gov.get_proposal(&id);
+    });
+}
+
+#[test]
+fn bench_get_proposals() {
+    let (env, gov, _token, _admin, proposer) = setup_env();
+
+    for i in 0..3u32 {
+        gov.create_proposal(
+            &proposer,
+            &String::from_str(&env, "Get Proposals Benchmark"),
+            &String::from_str(&env, "Measuring instruction count for get_proposals"),
+            &1_000_000i128,
+            &604_800u64,
+            &None,
+            &None,
+        );
+        let _ = i;
+    }
+
+    measure(&env, &gov, "get_proposals", || {
+        gov.get_proposals(&0u32, &10u32);
+    });
+}
+
+#[test]
+fn bench_get_config() {
+    let (env, gov, _token, _admin, _proposer) = setup_env();
+
+    measure(&env, &gov, "get_config", || {
+        gov.get_config();
+    });
+}
+
+#[test]
+fn bench_proposal_count() {
+    let (env, gov, _token, _admin, proposer) = setup_env();
+
+    gov.create_proposal(
+        &proposer,
+        &String::from_str(&env, "Count Benchmark"),
+        &String::from_str(&env, "Measuring instruction count for proposal_count"),
+        &1_000_000i128,
+        &604_800u64,
+        &None,
+        &None,
+    );
+
+    measure(&env, &gov, "proposal_count", || {
+        gov.proposal_count();
+    });
+}
+
+#[test]
+fn bench_has_voted() {
+    let (env, gov, token, admin, proposer) = setup_env();
+
+    let id = gov.create_proposal(
+        &proposer,
+        &String::from_str(&env, "Has Voted Benchmark"),
+        &String::from_str(&env, "Measuring instruction count for has_voted"),
+        &1_000_000i128,
+        &604_800u64,
+        &None,
+        &None,
+    );
+
+    let voter = Address::generate(&env);
+    token.mint(&admin, &voter, &1_000i128);
+    gov.cast_vote(&voter, &id, &Vote::Yes);
+
+    measure(&env, &gov, "has_voted", || {
+        gov.has_voted(&id, &voter);
+    });
+}
+
+#[test]
+fn bench_get_vote() {
+    let (env, gov, token, admin, proposer) = setup_env();
+
+    let id = gov.create_proposal(
+        &proposer,
+        &String::from_str(&env, "Get Vote Benchmark"),
+        &String::from_str(&env, "Measuring instruction count for get_vote"),
+        &1_000_000i128,
+        &604_800u64,
+        &None,
+        &None,
+    );
+
+    let voter = Address::generate(&env);
+    token.mint(&admin, &voter, &1_000i128);
+    gov.cast_vote(&voter, &id, &Vote::Yes);
+
+    measure(&env, &gov, "get_vote", || {
+        gov.get_vote(&id, &voter);
+    });
+}
+
+#[test]
+fn bench_set_admin() {
+    let (env, gov, _token, admin, _proposer) = setup_env();
+    let new_admin = Address::generate(&env);
+
+    measure(&env, &gov, "set_admin", || {
+        gov.set_admin(&admin, &new_admin);
+    });
+}
+
+#[test]
+fn bench_set_config() {
+    let (env, gov, _token, admin, _proposer) = setup_env();
+
+    measure(&env, &gov, "set_config", || {
+        gov.set_config(&admin, &0i128, &0u64, &0u32, &false, &None, &0u32);
+    });
 }
