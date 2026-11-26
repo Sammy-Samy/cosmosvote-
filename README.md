@@ -197,6 +197,8 @@ non-delegated comparison table.
 - Stellar CLI (optional, for deployment)
 - Docker & Docker Compose (optional).
 
+> 📖 **Platform-specific setup:** see [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) for step-by-step instructions on **macOS**, **Linux**, and **Windows/WSL2**, including per-platform prerequisites, known issues, and workarounds (e.g. Homebrew Rust version mismatches, WSL2 Docker networking).
+
 ### Supported Versions
 
 | Component | Supported versions | Notes |
@@ -205,6 +207,8 @@ non-delegated comparison table.
 | Node.js | 20 (LTS), 22 (current LTS) | For frontend build |
 
 Matrix build status is tracked in the [Matrix Tests workflow](.github/workflows/matrix.yml).
+
+For platform-specific version requirements and known-issue workarounds, see [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md).
 
 ### 1. Clone & Configure
 
