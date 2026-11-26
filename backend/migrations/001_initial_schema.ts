@@ -35,6 +35,31 @@ const migration: Migration = {
     );
 
     -- -----------------------------------------------------------------------
+    -- Deduplicate existing subscription rows.
+    -- Keeps the earliest row (lowest id / created_at) for each
+    -- (email, webhook_url) pair and removes the rest.
+    -- -----------------------------------------------------------------------
+    DELETE FROM subscriptions
+    WHERE id NOT IN (
+      SELECT id FROM (
+        SELECT
+          id,
+          ROW_NUMBER() OVER (
+            PARTITION BY email, webhook_url
+            ORDER BY created_at ASC, id ASC
+          ) AS rn
+        FROM subscriptions
+      )
+      WHERE rn = 1
+    );
+
+    -- -----------------------------------------------------------------------
+    -- Enforce uniqueness of (email, webhook_url) at the database level.
+    -- -----------------------------------------------------------------------
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_subscriptions_email_webhook
+      ON subscriptions (email, webhook_url);
+
+    -- -----------------------------------------------------------------------
     -- Events table
     -- Indexed governance contract events fetched from Horizon / Soroban RPC.
     -- Used for replay, audit, and idempotency checking.

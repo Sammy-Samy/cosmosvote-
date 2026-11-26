@@ -31,6 +31,23 @@ export interface SubscriptionRecord extends NewSubscription {
   createdAt: number; // Unix timestamp (ms)
 }
 
+/**
+ * Thrown when attempting to register a subscription whose
+ * (email, webhookUrl) pair already exists. Callers should map this
+ * to HTTP 409 Conflict.
+ */
+export class DuplicateSubscriptionError extends Error {
+  readonly email: string;
+  readonly webhookUrl: string;
+
+  constructor(email: string, webhookUrl: string) {
+    super(`Subscription already exists for ${email} with webhook ${webhookUrl}`);
+    this.name = 'DuplicateSubscriptionError';
+    this.email = email;
+    this.webhookUrl = webhookUrl;
+  }
+}
+
 const DEFAULT_DB_PATH = './data/subscriptions.db';
 
 /**
@@ -123,6 +140,30 @@ export class SubscriptionStore {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_subscriptions_email
         ON subscriptions (email);
     `);
+
+    // Clean up any pre-existing duplicates before enforcing uniqueness.
+    this.deduplicate();
+
+    this.db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_subscriptions_email_webhook
+        ON subscriptions (email, webhook_url);
+    `);
+  }
+
+  /**
+   * Remove duplicate subscriptions, keeping the earliest row (lowest id)
+   * for each (email, webhook_url) pair. Returns the number of rows deleted.
+   */
+  deduplicate(): number {
+    const result = this.db
+      .prepare(
+        `DELETE FROM subscriptions
+         WHERE id NOT IN (
+           SELECT MIN(id) FROM subscriptions GROUP BY email, webhook_url
+         )`
+      )
+      .run();
+    return result.changes;
   }
 
   // ---------------------------------------------------------------------------
@@ -141,11 +182,24 @@ export class SubscriptionStore {
     }
 
     const now = Date.now();
-    const result = this.db
-      .prepare(
-        'INSERT INTO subscriptions (email, webhook_url, created_at) VALUES (?, ?, ?)'
-      )
-      .run(sub.email, sub.webhookUrl, now);
+    let result: Database.RunResult;
+    try {
+      result = this.db
+        .prepare(
+          'INSERT INTO subscriptions (email, webhook_url, created_at) VALUES (?, ?, ?)'
+        )
+        .run(sub.email, sub.webhookUrl, now);
+    } catch (err) {
+      // Guard against races that slip past the pre-check: the UNIQUE index
+      // on (email, webhook_url) will reject the insert.
+      if (
+        err instanceof Error &&
+        /UNIQUE constraint failed/i.test(err.message)
+      ) {
+        throw new DuplicateSubscriptionError(sub.email, sub.webhookUrl);
+      }
+      throw err;
+    }
 
     return {
       id: result.lastInsertRowid as number,

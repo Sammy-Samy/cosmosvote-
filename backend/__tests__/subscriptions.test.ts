@@ -130,6 +130,73 @@ describe('SubscriptionStore', () => {
     ).toThrow();
   });
 
+  // ── duplicate (email, webhookUrl) pair ────────────────────────────────────
+
+  it('rejects a duplicate (email, webhookUrl) pair with a conflict error', () => {
+    store.add({ email: 'henry@example.com', webhookUrl: 'https://hooks.example.com/henry' });
+
+    expect(() =>
+      store.add({ email: 'henry@example.com', webhookUrl: 'https://hooks.example.com/henry' })
+    ).toThrow(/conflict/i);
+  });
+
+  it('exposes a 409 status on the duplicate conflict error', () => {
+    store.add({ email: 'ivy@example.com', webhookUrl: 'https://hooks.example.com/ivy' });
+
+    try {
+      store.add({ email: 'ivy@example.com', webhookUrl: 'https://hooks.example.com/ivy' });
+      throw new Error('expected duplicate add to throw');
+    } catch (err) {
+      expect((err as { status?: number }).status).toBe(409);
+    }
+  });
+
+  it('does not persist a second row when a duplicate is rejected', () => {
+    store.add({ email: 'jack@example.com', webhookUrl: 'https://hooks.example.com/jack' });
+    expect(() =>
+      store.add({ email: 'jack@example.com', webhookUrl: 'https://hooks.example.com/jack' })
+    ).toThrow();
+
+    expect(store.findAll()).toHaveLength(1);
+  });
+
+  it('allows the same email with a different webhook URL', () => {
+    store.add({ email: 'kate@example.com', webhookUrl: 'https://hooks.example.com/kate-1' });
+    store.add({ email: 'kate@example.com', webhookUrl: 'https://hooks.example.com/kate-2' });
+
+    expect(store.findAll()).toHaveLength(2);
+  });
+
+  // ── deduplication of pre-existing duplicates ─────────────────────────────
+
+  it('removes pre-existing duplicates keeping the earliest row', () => {
+    // Bypass the duplicate guard to simulate legacy data written before the fix.
+    const raw = store as unknown as { db: { prepare: (sql: string) => any } };
+    const insert = raw.db.prepare(
+      'INSERT INTO subscriptions (email, webhook_url, created_at) VALUES (?, ?, ?)'
+    );
+    insert.run('legacy@example.com', 'https://hooks.example.com/legacy', 1000);
+    insert.run('legacy@example.com', 'https://hooks.example.com/legacy', 2000);
+    insert.run('legacy@example.com', 'https://hooks.example.com/legacy', 3000);
+
+    const removed = store.deduplicate();
+
+    expect(removed).toBe(2);
+    const all = store.findAll();
+    expect(all).toHaveLength(1);
+    expect(all[0].email).toBe('legacy@example.com');
+    expect(all[0].webhookUrl).toBe('https://hooks.example.com/legacy');
+    expect(all[0].createdAt).toBe(1000);
+  });
+
+  it('deduplicate is a no-op when there are no duplicates', () => {
+    store.add({ email: 'liam@example.com', webhookUrl: 'https://hooks.example.com/liam' });
+    store.add({ email: 'mia@example.com', webhookUrl: 'https://hooks.example.com/mia' });
+
+    expect(store.deduplicate()).toBe(0);
+    expect(store.findAll()).toHaveLength(2);
+  });
+
   // ── migration idempotency ─────────────────────────────────────────────────
 
   it('runs migration without error on an already-migrated database', () => {

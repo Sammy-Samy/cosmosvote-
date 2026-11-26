@@ -84,6 +84,24 @@ describe('loadEnv', () => {
     loadEnv();
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
+
+  it('applies defaults for audit log rotation vars', () => {
+    const { loadEnv } = loadWithEnv(REQUIRED);
+    const env = loadEnv();
+    expect(env.AUDIT_LOG_MAX_BYTES).toBe(100 * 1024 * 1024);
+    expect(env.AUDIT_LOG_RETENTION_DAYS).toBe(30);
+  });
+
+  it('accepts custom audit log rotation vars', () => {
+    const { loadEnv } = loadWithEnv({
+      ...REQUIRED,
+      AUDIT_LOG_MAX_BYTES: '1024',
+      AUDIT_LOG_RETENTION_DAYS: '7',
+    });
+    const env = loadEnv();
+    expect(env.AUDIT_LOG_MAX_BYTES).toBe(1024);
+    expect(env.AUDIT_LOG_RETENTION_DAYS).toBe(7);
+  });
 });
 
 describe('loadEnv faucet secret source validation', () => {
