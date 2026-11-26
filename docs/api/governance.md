@@ -106,6 +106,10 @@ pub fn create_proposal(
 | `quorum` | `i128` | `> 0`, `<= total_supply`, `>= floor` | Minimum total votes required to pass |
 | `duration` | `u64` | 60–2,592,000 seconds | Voting window length |
 
+**Quorum floor:** `quorum` must be at least `total_supply * min_quorum_bps / 10000` (integer division). A proposal whose quorum is below this floor is rejected with `QuorumBelowFloor (20)`, even if it is otherwise valid. When `min_quorum_bps = 0` no floor is enforced.
+
+**Treasury action limit:** A proposal may carry at most **10** treasury actions (`MAX_TREASURY_ACTIONS`). Attempting to create a proposal with more than 10 actions is rejected with `TooManyTreasuryActions (42)`.
+
 **Returns:** `Ok(proposal_id)` — the new proposal's `u64` ID.
 
 **Errors**
@@ -119,7 +123,7 @@ pub fn create_proposal(
 | 17 | `InvalidDurationRange` | Duration < 60 or > 2,592,000 |
 | 18 | `InsufficientBalance` | Proposer balance < `min_proposal_balance` |
 | 19 | `ProposalCooldown` | Proposer is within cooldown window |
-| 20 | `QuorumBelowFloor` | Quorum < `min_quorum_bps` floor |
+| 20 | `QuorumBelowFloor` | Quorum < `total_supply * min_quorum_bps / 10000` |
 | 40 | `ContractPaused` | Contract is paused |
 | 62 | `InvalidRecipient` | A treasury action recipient is the zero address |
 
@@ -205,7 +209,7 @@ pub fn cast_vote(
 | `proposal_id` | `u64` | Target proposal |
 | `vote` | `Vote` | `Vote::Yes`, `Vote::No`, or `Vote::Abstain` |
 
-Vote weight equals the voter's token balance at the proposal's `snapshot_ledger`. Abstain votes count toward quorum but not toward the yes/no outcome.
+Vote weight equals the voter's token balance at the proposal's `snapshot_ledger`, read via the token's `balance_at` query. Abstain votes count toward quorum but not toward the yes/no outcome.
 
 **Errors**
 
@@ -452,7 +456,7 @@ Read-only accessors for admin address, pending admin (if any), and contract vers
 | 17 | `InvalidDurationRange` | Duration out of 60–2,592,000 range |
 | 18 | `InsufficientBalance` | Proposer below minimum balance |
 | 19 | `ProposalCooldown` | Proposer within cooldown window |
-| 20 | `QuorumBelowFloor` | Quorum below `min_quorum_bps` floor |
+| 20 | `QuorumBelowFloor` | Quorum below `total_supply * min_quorum_bps / 10000` |
 | 21 | `VotingNotStarted` | Voting period not yet started |
 | 22 | `VotingPeriodEnded` | Voting period has ended |
 | 23 | `VotingStillOpen` | Voting period still open |

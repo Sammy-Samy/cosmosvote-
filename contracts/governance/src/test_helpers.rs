@@ -39,7 +39,9 @@ pub fn setup<'a>(env: &'a Env) -> TestEnv<'a> {
         &7u32,
     );
 
-    // Fund voters
+    // Fund voters before any proposal is created so that snapshot-based vote
+    // weights (token.balance_at(voter, proposal.snapshot_ledger)) reflect these
+    // balances for proposals created via `create_proposal` below.
     token.mint(&admin, &voter_a, &10_000_000i128);
     token.mint(&admin, &voter_b, &5_000_000i128);
     token.mint(&admin, &voter_c, &3_000_000i128);

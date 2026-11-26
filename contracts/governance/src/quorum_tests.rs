@@ -12,7 +12,7 @@ use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env, String};
 
 use crate::{
     types::{ProposalState, Vote},
-    GovernanceContract, GovernanceContractClient,
+    GovernanceContract, GovernanceContractClient, GovernanceError,
 };
 use cosmosvote_token::{TokenContract, TokenContractClient};
 

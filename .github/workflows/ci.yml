@@ -10,6 +10,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   RUST_VERSION: "1.78.0"
+  NODE_VERSION: "20"
 
 # Required status checks (configure these as branch protection rules for main/develop):
 #   - "Secrets Scan" (secret-scan)  — gitleaks over full git history; violations block merge (#488)
@@ -292,11 +293,34 @@ jobs:
           path: target/wasm32-unknown-unknown/release/*.wasm
           retention-days: 7
 
+  backend-node:
+    name: Backend Node Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Verify Node version matches engines constraint
+        run: |
+          set -euo pipefail
+          node --version
+          node -e "const r=require('./package.json').engines.node;const s=require('semver');if(!s.satisfies(process.version,r)){console.error('Node '+process.version+' does not satisfy engines.node '+r);process.exit(1)}"
+      - name: Install backend dependencies
+        run: npm ci
+      - name: Type-check backend
+        run: npm run typecheck --if-present
+      - name: Test backend
+        run: npm test --if-present
+
   deployment-tooling:
     name: Deployment Tooling Checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
       - name: Lint shell scripts
         run: |
           find scripts/ -name '*.sh' | xargs -I{} bash -n {}
@@ -441,7 +465,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "20"
+          node-version: ${{ env.NODE_VERSION }}
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm ci
@@ -532,7 +556,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '20'
+          node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
       - name: Install dependencies
@@ -556,6 +580,7 @@ jobs:
       - error-snapshot
       - benchmark
       - build
+      - backend-node
       - deployment-tooling
       - docker-build
       - docker-manifest
@@ -581,6 +606,7 @@ jobs:
             "ContractError Snapshot Gate:${{ needs.error-snapshot.result }}" \
             "Instruction Count Benchmarks:${{ needs.benchmark.result }}" \
             "Build WASM:${{ needs.build.result }}" \
+            "Backend Node Checks:${{ needs.backend-node.result }}" \
             "Deployment Tooling Checks:${{ needs.deployment-tooling.result }}" \
             "Docker Build:${{ needs.docker-build.result }}" \
             "Docker Multi-Arch Manifest:${{ needs.docker-manifest.result }}" \
