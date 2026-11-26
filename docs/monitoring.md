@@ -73,91 +73,69 @@ fetch(process.env.SLACK_WEBHOOK_URL, {
 // PagerDuty, email, SNS, etc.
 ```
 
-## Log Aggregation
+## Grafana / Prometheus Alerting Rules
 
-Backend containers write newline-delimited JSON to stdout. Docker Compose ships with a `logging` driver configured for every backend service so logs survive container restarts and are queryable centrally.
+In addition to the off-chain monitor above, alerting rules are exported as code in
+`monitoring/alerts.yml` and visualised via `monitoring/grafana-dashboard.json`.
+These rules cover critical governance and infrastructure events and are evaluated
+by Prometheus (or Grafana's managed alerting) on a short interval.
 
-### Logging Driver
+### Alert Rules
 
-Two drivers are supported; pick one via `LOG_DRIVER` in your `.env`:
+| Alert | Expression / Condition | Threshold | Severity | For |
+|-------|------------------------|-----------|----------|-----|
+| `RpcErrorRateHigh` | `rate(rpc_requests_total{status=~"5.."}[5m]) / rate(rpc_requests_total[5m])` | > 5% | `critical` | 5m |
+| `NoProposalsFinalised` | `increase(governance_proposals_finalised_total[24h])` while `governance_active_proposals > 0` | 0 finalised in 24h with active proposals | `warning` | 24h |
+| `FaucetErrorRateHigh` | `rate(faucet_claims_total{status="error"}[5m]) / rate(faucet_claims_total[5m])` | > 10% | `critical` | 5m |
 
-| `LOG_DRIVER` | Driver | Notes |
-|--------------|--------|-------|
-| `awslogs` (default) | Amazon CloudWatch Logs | Requires `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` (or an instance role). Log group: `${LOG_GROUP_PREFIX:-cosmosvote}/backend`. |
-| `loki` | Grafana Loki | Requires the `loki` Docker logging plugin (`docker plugin install grafana/loki-docker-driver:latest --alias loki --grant-all-permissions`) and `LOKI_URL`. |
+Each rule carries `labels` (including `severity` and `team: cosmosvote`) and
+`annotations` (`summary` and `description`) so notifications are self-explanatory.
 
-Example Compose snippet (already applied to backend services):
+### Loading the Rules
+
+`monitoring/alerts.yml` is a standard Prometheus rule file. Point Prometheus at it
+via `rule_files` in `prometheus.yml`:
 
 ```yaml
-logging:
-  driver: ${LOG_DRIVER:-awslogs}
-  options:
-    awslogs-region: ${AWS_REGION:-us-east-1}
-    awslogs-group: ${LOG_GROUP_PREFIX:-cosmosvote}/backend
-    awslogs-stream: ${SERVICE_NAME:-backend}-{{.Name}}
-    awslogs-create-group: "true"
-    # Loki alternative:
-    # loki-url: ${LOKI_URL}
-    # loki-retries: "3"
-    # loki-batch-wait: "1s"
+rule_files:
+  - /etc/prometheus/alerts.yml
 ```
 
-### Retention Policy
+Or, if using Grafana-managed alerting, import the file through the Grafana
+provisioning directory (`/etc/grafana/provisioning/alerting/`). Reload Prometheus
+after changes with `curl -X POST http://localhost:9090/-/reload` (or send `SIGHUP`).
 
-- **Minimum retention: 30 days** for all backend log streams.
-- CloudWatch: set the log group retention to `30` (or longer) days:
-  ```bash
-  aws logs put-retention-policy \
-    --log-group-name "${LOG_GROUP_PREFIX:-cosmosvote}/backend" \
-    --retention-in-days 30
-  ```
-- Loki: configure the `limits_config.retention_period: 720h` (30 days) in the Loki config, or a longer period for compliance needs.
-- Retention is enforced by the aggregation backend, not by Docker; local `json-file` rotation is disabled for aggregated services.
+### Routing Notifications
 
-### Querying Logs
+Alerts are routed to the team via Alertmanager. Configure a receiver for the team
+webhook and/or email in `alertmanager.yml`:
 
-CloudWatch Logs Insights:
+```yaml
+route:
+  receiver: team-notifications
+  group_by: [alertname, severity]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
 
-```
-fields @timestamp, level, service, event, traceId, err
-| filter level = "error"
-| sort @timestamp desc
-| limit 100
-```
-
-Loki (LogQL):
-
-```logql
-{service="backend"} | json | level="error"
-{service="backend"} | json | event="LARGE_TOKEN_TRANSFER"
-{service="backend"} | json | traceId="<trace-id>"
+receivers:
+  - name: team-notifications
+    webhook_configs:
+      - url: ${TEAM_WEBHOOK_URL}      # e.g. Slack/Teams incoming webhook
+        send_resolved: true
+    email_configs:
+      - to: ${TEAM_ALERT_EMAIL}       # e.g. oncall@example.com
+        from: alerts@example.com
+        smarthost: smtp.example.com:587
+        send_resolved: true
 ```
 
-### Structured Log Fields
-
-Emitted by `backend/src/logger.ts`. All lines are JSON objects with the following fields:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `timestamp` | string (ISO 8601) | Time the record was emitted |
-| `level` | string | `debug`, `info`, `warn`, or `error` |
-| `service` | string | Service name (e.g. `backend`) |
-| `pid` | number | Process ID of the emitting worker |
-| `traceId` | string | Request/correlation ID for tracing across services |
-| `event` | string | Logical event name (e.g. `LARGE_TOKEN_TRANSFER`) |
-| `err` | object | Serialized error (`message`, `stack`, `name`) when `level=error` |
-| `webhookUrl` | string | **Redacted** — replaced with `[REDACTED]` |
-| `email` | string | **Redacted** |
-| `secretKey` | string | **Redacted** |
-| `password` | string | **Redacted** |
-| `token` | string | **Redacted** |
-| `apiKey` | string | **Redacted** |
-| `authorization` | string | **Redacted** |
-| `dsn` | string | **Redacted** |
-
-Sensitive fields are scrubbed by the logger before serialization; never log raw credentials. Use `traceId` to correlate a request across services and `event` for alert-oriented queries.
+Set `TEAM_WEBHOOK_URL` and `TEAM_ALERT_EMAIL` in the Alertmanager environment.
+Critical alerts (`RpcErrorRateHigh`, `FaucetErrorRateHigh`) should page on-call;
+the `NoProposalsFinalised` warning can route to a lower-priority channel.
 
 ## Running in Production
+=======
 
 For continuous operation, run the script under a process manager:
 

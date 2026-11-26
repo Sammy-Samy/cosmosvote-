@@ -23,6 +23,9 @@ use soroban_sdk::{
     Address, Env, String,
 };
 
+/// Number of ledgers in 30 days, assuming a 5-second ledger close time.
+const THIRTY_DAYS_LEDGERS: u32 = 30 * 24 * 60 * 60 / 5; // 518_400
+
 use crate::{
     types::{ProposalState, Vote},
     GovernanceContract, GovernanceContractClient,
@@ -196,4 +199,133 @@ fn test_proposal_readable_after_ttl_threshold_advance() {
     let proposal = t.gov.get_proposal(&proposal_id);
     assert_eq!(proposal.id, proposal_id);
     assert_eq!(proposal.state, ProposalState::Active);
+}
+
+// ---------------------------------------------------------------------------
+// Explicit TTL assertions (issue #454)
+// ---------------------------------------------------------------------------
+
+/// Compute the minimum acceptable TTL (in ledgers) for a proposal whose voting
+/// window ends at `end_time`, given the current ledger timestamp.
+///
+/// The requirement is that the Proposal entry lives at least until
+/// `end_time + 30 days`, expressed in ledgers (5 s per ledger).
+fn min_required_ttl(env: &Env, end_time: u64) -> u32 {
+    let now = env.ledger().timestamp();
+    let remaining_secs = end_time.saturating_sub(now);
+    let total_secs = remaining_secs + 30 * 24 * 60 * 60;
+    (total_secs / 5) as u32
+}
+
+/// Read the persistent TTL for the Proposal key and assert it is at least
+/// `min_required_ttl(env, end_time)`.
+fn assert_proposal_ttl(env: &Env, proposal_id: u64, end_time: u64) {
+    let key = crate::storage::DataKey::Proposal(proposal_id);
+    let ttl = env
+        .storage()
+        .persistent()
+        .get_ttl(&key)
+        .expect("Proposal entry must exist in persistent storage");
+    let required = min_required_ttl(env, end_time);
+    assert!(
+        ttl >= required,
+        "Proposal TTL {ttl} is below required {required} ledgers (end_time={end_time})"
+    );
+}
+
+/// cast_vote must bump the Proposal TTL to at least `end_time + 30 days`.
+#[test]
+fn test_cast_vote_bumps_proposal_ttl_explicit() {
+    let env = Env::default();
+    let t = setup(&env);
+
+    let duration: u64 = 2_592_000; // 30-day proposal (max allowed)
+    let proposal_id = t.gov.create_proposal(
+        &t.voter_a,
+        &String::from_str(t.env, "TTL Proposal"),
+        &String::from_str(t.env, "explicit TTL assertion"),
+        &5_000_000i128,
+        &duration,
+        &None,
+        &None,
+    );
+
+    let start_time = env.ledger().timestamp();
+    let end_time = start_time + duration;
+
+    // Advance partway through the voting window.
+    env.ledger().with_mut(|l| {
+        l.sequence_number += 100_000;
+        l.timestamp = start_time + 1_000_000;
+    });
+
+    t.gov.cast_vote(&t.voter_a, &proposal_id, &Vote::Yes);
+
+    assert_proposal_ttl(&env, proposal_id, end_time);
+}
+
+/// finalise must bump the Proposal TTL to at least `end_time + 30 days`.
+#[test]
+fn test_finalise_bumps_proposal_ttl_explicit() {
+    let env = Env::default();
+    let t = setup(&env);
+
+    let duration: u64 = 2_592_000; // 30-day proposal (max allowed)
+    let proposal_id = t.gov.create_proposal(
+        &t.voter_a,
+        &String::from_str(t.env, "TTL Proposal"),
+        &String::from_str(t.env, "explicit TTL assertion"),
+        &5_000_000i128,
+        &duration,
+        &None,
+        &None,
+    );
+
+    let start_time = env.ledger().timestamp();
+    let end_time = start_time + duration;
+
+    t.gov.cast_vote(&t.voter_a, &proposal_id, &Vote::Yes);
+    t.gov.cast_vote(&t.voter_b, &proposal_id, &Vote::Yes);
+
+    // Advance past voting end.
+    env.ledger().with_mut(|l| {
+        l.sequence_number += 200_000;
+        l.timestamp = end_time + 1;
+    });
+
+    t.gov.finalise(&proposal_id);
+
+    assert_proposal_ttl(&env, proposal_id, end_time);
+}
+
+/// TTL bump must hold for a short-duration proposal too, and remain at least
+/// 30 days worth of ledgers beyond the (already-passed) end_time.
+#[test]
+fn test_short_proposal_ttl_floor() {
+    let env = Env::default();
+    let t = setup(&env);
+
+    let duration: u64 = 604_800; // 7 days
+    let proposal_id = t.gov.create_proposal(
+        &t.voter_a,
+        &String::from_str(t.env, "Short Proposal"),
+        &String::from_str(t.env, "short duration TTL"),
+        &5_000_000i128,
+        &duration,
+        &None,
+        &None,
+    );
+
+    let start_time = env.ledger().timestamp();
+    let end_time = start_time + duration;
+
+    t.gov.cast_vote(&t.voter_a, &proposal_id, &Vote::Yes);
+    assert_proposal_ttl(&env, proposal_id, end_time);
+
+    env.ledger().with_mut(|l| {
+        l.sequence_number += 50_000;
+        l.timestamp = end_time + 1;
+    });
+    t.gov.finalise(&proposal_id);
+    assert_proposal_ttl(&env, proposal_id, end_time);
 }
