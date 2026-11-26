@@ -35,7 +35,7 @@ fn setup(env: &Env) -> (GovernanceContractClient<'_>, TokenContractClient<'_>, A
 
     let gov_id = env.register(GovernanceContract, ());
     let gov = GovernanceContractClient::new(env, &gov_id);
-    gov.initialize(&admin, &token_id, &0i128, &0u64, &0u32, &false, &None, &0u32);
+    gov.initialize(&admin, &token_id, &0i128, &0u64, &0u32, &false, &None, &0u32, &0u32);
 
     (gov, token, admin, voter)
 }
@@ -212,6 +212,178 @@ fn test_create_proposal_duration_too_long_rejected() {
         &None,
     );
     assert_eq!(result, Err(Ok(ContractError::InvalidDurationRange)));
+}
+
+// ---------------------------------------------------------------------------
+// create_proposal — choices validation (multi-choice)
+// ---------------------------------------------------------------------------
+
+fn make_choices(env: &Env, count: u32, len: usize) -> soroban_sdk::Vec<String> {
+    let mut choices = soroban_sdk::Vec::new(env);
+    for i in 0..count {
+        let s = String::from_str(env, &format!("{}{}", "c", i).repeat(1));
+        // Build a string of exactly `len` characters, unique per index.
+        let mut base = String::from_str(env, "");
+        let _ = base;
+        let mut content = String::from_str(env, "");
+        let _ = content;
+        let mut text = String::from_str(env, "");
+        let _ = text;
+        let _ = s;
+        let mut buf = String::from_str(env, "");
+        let _ = buf;
+        // Construct via repeat of a single char to reach `len`.
+        let filler = "x".repeat(len.saturating_sub(1));
+        let value = format!("{}{}", i % 10, filler);
+        choices.push_back(String::from_str(env, &value));
+    }
+    choices
+}
+
+#[test]
+fn test_create_proposal_one_choice_rejected() {
+    let env = Env::default();
+    let (gov, _, admin, _) = setup(&env);
+
+    let choices = make_choices(&env, 1, 5);
+    let result = gov.try_create_proposal(
+        &admin,
+        &String::from_str(&env, "Title"),
+        &String::from_str(&env, "Description"),
+        &1_000i128,
+        &3600u64,
+        &Some(choices),
+        &None,
+    );
+    assert_eq!(result, Err(Ok(ContractError::TooFewChoices)));
+}
+
+#[test]
+fn test_create_proposal_two_choices_succeeds() {
+    let env = Env::default();
+    let (gov, _, admin, _) = setup(&env);
+
+    let choices = make_choices(&env, 2, 5);
+    let result = gov.try_create_proposal(
+        &admin,
+        &String::from_str(&env, "Title"),
+        &String::from_str(&env, "Description"),
+        &1_000i128,
+        &3600u64,
+        &Some(choices),
+        &None,
+    );
+    assert!(result.is_ok(), "two choices should be accepted");
+}
+
+#[test]
+fn test_create_proposal_ten_choices_succeeds() {
+    let env = Env::default();
+    let (gov, _, admin, _) = setup(&env);
+
+    let choices = make_choices(&env, 10, 5);
+    let result = gov.try_create_proposal(
+        &admin,
+        &String::from_str(&env, "Title"),
+        &String::from_str(&env, "Description"),
+        &1_000i128,
+        &3600u64,
+        &Some(choices),
+        &None,
+    );
+    assert!(result.is_ok(), "ten choices should be accepted");
+}
+
+#[test]
+fn test_create_proposal_eleven_choices_rejected() {
+    let env = Env::default();
+    let (gov, _, admin, _) = setup(&env);
+
+    let choices = make_choices(&env, 11, 5);
+    let result = gov.try_create_proposal(
+        &admin,
+        &String::from_str(&env, "Title"),
+        &String::from_str(&env, "Description"),
+        &1_000i128,
+        &3600u64,
+        &Some(choices),
+        &None,
+    );
+    assert_eq!(result, Err(Ok(ContractError::TooManyChoices)));
+}
+
+#[test]
+fn test_create_proposal_empty_choice_rejected() {
+    let env = Env::default();
+    let (gov, _, admin, _) = setup(&env);
+
+    let mut choices = soroban_sdk::Vec::new(&env);
+    choices.push_back(String::from_str(&env, "Valid"));
+    choices.push_back(String::from_str(&env, ""));  // empty choice
+    let result = gov.try_create_proposal(
+        &admin,
+        &String::from_str(&env, "Title"),
+        &String::from_str(&env, "Description"),
+        &1_000i128,
+        &3600u64,
+        &Some(choices),
+        &None,
+    );
+    assert_eq!(result, Err(Ok(ContractError::InvalidChoiceLength)));
+}
+
+#[test]
+fn test_create_proposal_one_char_choice_succeeds() {
+    let env = Env::default();
+    let (gov, _, admin, _) = setup(&env);
+
+    let choices = make_choices(&env, 2, 1);
+    let result = gov.try_create_proposal(
+        &admin,
+        &String::from_str(&env, "Title"),
+        &String::from_str(&env, "Description"),
+        &1_000i128,
+        &3600u64,
+        &Some(choices),
+        &None,
+    );
+    assert!(result.is_ok(), "one-char choices should be accepted");
+}
+
+#[test]
+fn test_create_proposal_64_char_choice_succeeds() {
+    let env = Env::default();
+    let (gov, _, admin, _) = setup(&env);
+
+    let choices = make_choices(&env, 2, 64);
+    let result = gov.try_create_proposal(
+        &admin,
+        &String::from_str(&env, "Title"),
+        &String::from_str(&env, "Description"),
+        &1_000i128,
+        &3600u64,
+        &Some(choices),
+        &None,
+    );
+    assert!(result.is_ok(), "64-char choices should be accepted");
+}
+
+#[test]
+fn test_create_proposal_65_char_choice_rejected() {
+    let env = Env::default();
+    let (gov, _, admin, _) = setup(&env);
+
+    let choices = make_choices(&env, 2, 65);
+    let result = gov.try_create_proposal(
+        &admin,
+        &String::from_str(&env, "Title"),
+        &String::from_str(&env, "Description"),
+        &1_000i128,
+        &3600u64,
+        &Some(choices),
+        &None,
+    );
+    assert_eq!(result, Err(Ok(ContractError::InvalidChoiceLength)));
 }
 
 // ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@
  *
  * Issue #284 – multi-channel support
  * Issue #43  – graceful shutdown with in-flight request draining
+ * Issue #423 – input size limit on all JSON request bodies
  *
  * Usage:
  *   npx ts-node src/index.ts start
@@ -42,6 +43,7 @@ try {
   // dotenv is optional
 }
 
+import type { IncomingMessage, ServerResponse } from 'http';
 import { startWatcher, stopWatcher } from './watcher';
 import { addSubscriber, removeSubscriber, listSubscribers } from './subscriptions';
 import { GovernanceEventType } from './types';
@@ -51,6 +53,129 @@ const ALL_EVENTS: GovernanceEventType[] = ['created', 'voted', 'final', 'exec', 
 
 /** Grace period (ms) to wait for in-flight webhook deliveries and DB writes. */
 const SHUTDOWN_TIMEOUT_MS = Number(process.env.SHUTDOWN_TIMEOUT_MS ?? 30_000);
+
+/**
+ * Maximum accepted size (in bytes) for a JSON request body.
+ *
+ * Issue #423: oversized payloads can cause OOM conditions, so every JSON
+ * POST handler must enforce this limit and respond with 413 when exceeded.
+ * Configurable via the MAX_BODY_BYTES env var (default 64 KB).
+ */
+const MAX_BODY_BYTES = (() => {
+  const raw = process.env.MAX_BODY_BYTES;
+  const parsed = raw !== undefined ? Number(raw) : NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 65_536;
+})();
+
+/** Error thrown by readJsonBody when the request body exceeds MAX_BODY_BYTES. */
+export class PayloadTooLargeError extends Error {
+  constructor(public readonly limit: number) {
+    super(`Request body exceeds the maximum allowed size of ${limit} bytes`);
+    this.name = 'PayloadTooLargeError';
+  }
+}
+
+/** Error thrown by readJsonBody when the body is not valid JSON. */
+export class InvalidJsonError extends Error {
+  constructor(message = 'Request body is not valid JSON') {
+    super(message);
+    this.name = 'InvalidJsonError';
+  }
+}
+
+/**
+ * Read and parse a JSON request body while enforcing a hard byte limit.
+ *
+ * Accumulates the received bytes and, as soon as the limit is exceeded,
+ * destroys the request stream and rejects with a {@link PayloadTooLargeError}
+ * so the caller can respond with HTTP 413. The limit defaults to
+ * {@link MAX_BODY_BYTES} but may be overridden per call.
+ */
+export function readJsonBody<T = unknown>(
+  req: IncomingMessage,
+  limit: number = MAX_BODY_BYTES,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let received = 0;
+    let settled = false;
+
+    const fail = (err: Error): void => {
+      if (settled) return;
+      settled = true;
+      // Stop consuming the oversized stream.
+      req.removeListener('data', onData);
+      req.removeListener('end', onEnd);
+      req.removeListener('error', onError);
+      req.destroy();
+      reject(err);
+    };
+
+    const onData = (chunk: Buffer | string): void => {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      received += buf.length;
+      if (received > limit) {
+        fail(new PayloadTooLargeError(limit));
+        return;
+      }
+      chunks.push(buf);
+    };
+
+    const onEnd = (): void => {
+      if (settled) return;
+      settled = true;
+      const raw = Buffer.concat(chunks).toString('utf8');
+      if (raw.trim() === '') {
+        resolve(undefined as unknown as T);
+        return;
+      }
+      try {
+        resolve(JSON.parse(raw) as T);
+      } catch {
+        reject(new InvalidJsonError());
+      }
+    };
+
+    const onError = (err: Error): void => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    };
+
+    // Reject early when the declared Content-Length already exceeds the limit.
+    const declared = Number(req.headers['content-length']);
+    if (Number.isFinite(declared) && declared > limit) {
+      fail(new PayloadTooLargeError(limit));
+      return;
+    }
+
+    req.on('data', onData);
+    req.on('end', onEnd);
+    req.on('error', onError);
+  });
+}
+
+/**
+ * Send a 413 Payload Too Large response for an oversized request body.
+ * Returns true when the error was a size violation (and was handled).
+ */
+export function handleBodyError(res: ServerResponse, err: unknown): boolean {
+  if (err instanceof PayloadTooLargeError) {
+    if (!res.headersSent) {
+      res.writeHead(413, { 'Content-Type': 'application/json', Connection: 'close' });
+      res.end(JSON.stringify({ error: 'Payload Too Large', limit: err.limit }));
+    }
+    return true;
+  }
+  if (err instanceof InvalidJsonError) {
+    if (!res.headersSent) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Bad Request', message: err.message }));
+    }
+    return true;
+  }
+  return false;
+}
 
 function parseArgs(): { cmd: string; args: string[] } {
   const [, , cmd = 'start', ...args] = process.argv;

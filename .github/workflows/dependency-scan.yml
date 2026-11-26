@@ -25,10 +25,41 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6d653acede28d24f02e3cd7ee9c24d4c9f2c4e2b # stable
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@a37010ded18ff788be44ed8e51f3c71902cd317c # v2
         with:
           tool: cargo-deny
       - name: Run cargo deny check licenses
         run: cargo deny check licenses
+
+  node-license-check:
+    name: Node license compliance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Run frontend license check
+        working-directory: frontend
+        run: npm run license-check
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+      - name: Run backend license check
+        working-directory: backend
+        run: npm run license-check
+      - name: Upload license reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-license-reports
+          path: |
+            frontend/license-report.json
+            backend/license-report.json
+          if-no-files-found: warn

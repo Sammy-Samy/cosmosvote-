@@ -23,6 +23,7 @@ import Database from 'better-sqlite3';
 export interface NewSubscription {
   email: string;
   webhookUrl: string;
+  contractId?: string;
 }
 
 export interface SubscriptionRecord extends NewSubscription {
@@ -30,7 +31,84 @@ export interface SubscriptionRecord extends NewSubscription {
   createdAt: number; // Unix timestamp (ms)
 }
 
+/**
+ * Thrown when attempting to register a subscription whose
+ * (email, webhookUrl) pair already exists. Callers should map this
+ * to HTTP 409 Conflict.
+ */
+export class DuplicateSubscriptionError extends Error {
+  readonly email: string;
+  readonly webhookUrl: string;
+
+  constructor(email: string, webhookUrl: string) {
+    super(`Subscription already exists for ${email} with webhook ${webhookUrl}`);
+    this.name = 'DuplicateSubscriptionError';
+    this.email = email;
+    this.webhookUrl = webhookUrl;
+  }
+}
+
 const DEFAULT_DB_PATH = './data/subscriptions.db';
+
+/**
+ * Error thrown when a subscription references a contract ID that is not in
+ * the configured allowlist. Carries `status = 400` so the HTTP layer can map
+ * it directly to a Bad Request response.
+ */
+export class UnknownContractError extends Error {
+  readonly status = 400;
+  readonly contractId: string;
+
+  constructor(contractId: string) {
+    super(`Unknown contract ID: ${contractId}`);
+    this.name = 'UnknownContractError';
+    this.contractId = contractId;
+  }
+}
+
+/**
+ * Build the set of allowed contract IDs from the environment.
+ *
+ * Sources (all optional, merged):
+ *   GOVERNANCE_CONTRACT_ID  – single governance contract ID
+ *   TOKEN_CONTRACT_ID       – single token contract ID
+ *   ALLOWED_CONTRACT_IDS    – comma-separated list of additional contract IDs
+ *
+ * An empty allowlist means no contract IDs are permitted.
+ */
+export function getAllowedContractIds(
+  env: NodeJS.ProcessEnv = process.env
+): Set<string> {
+  const ids = new Set<string>();
+
+  const add = (value: string | undefined): void => {
+    if (!value) return;
+    for (const part of value.split(',')) {
+      const trimmed = part.trim();
+      if (trimmed) ids.add(trimmed);
+    }
+  };
+
+  add(env.GOVERNANCE_CONTRACT_ID);
+  add(env.TOKEN_CONTRACT_ID);
+  add(env.ALLOWED_CONTRACT_IDS);
+
+  return ids;
+}
+
+/**
+ * Validate a contract ID against the allowlist.
+ * Throws `UnknownContractError` (status 400) if it is not allowed.
+ */
+export function validateContractId(
+  contractId: string,
+  env: NodeJS.ProcessEnv = process.env
+): void {
+  const allowed = getAllowedContractIds(env);
+  if (!allowed.has(contractId)) {
+    throw new UnknownContractError(contractId);
+  }
+}
 
 export class SubscriptionStore {
   private readonly db: Database.Database;
@@ -62,6 +140,30 @@ export class SubscriptionStore {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_subscriptions_email
         ON subscriptions (email);
     `);
+
+    // Clean up any pre-existing duplicates before enforcing uniqueness.
+    this.deduplicate();
+
+    this.db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_subscriptions_email_webhook
+        ON subscriptions (email, webhook_url);
+    `);
+  }
+
+  /**
+   * Remove duplicate subscriptions, keeping the earliest row (lowest id)
+   * for each (email, webhook_url) pair. Returns the number of rows deleted.
+   */
+  deduplicate(): number {
+    const result = this.db
+      .prepare(
+        `DELETE FROM subscriptions
+         WHERE id NOT IN (
+           SELECT MIN(id) FROM subscriptions GROUP BY email, webhook_url
+         )`
+      )
+      .run();
+    return result.changes;
   }
 
   // ---------------------------------------------------------------------------
@@ -71,19 +173,39 @@ export class SubscriptionStore {
   /**
    * Persist a new subscription.
    * Throws if a subscription with the same email already exists.
+   * Throws `UnknownContractError` (status 400) if `contractId` is provided
+   * but is not in the configured allowlist.
    */
   add(sub: NewSubscription): SubscriptionRecord {
+    if (sub.contractId !== undefined) {
+      validateContractId(sub.contractId);
+    }
+
     const now = Date.now();
-    const result = this.db
-      .prepare(
-        'INSERT INTO subscriptions (email, webhook_url, created_at) VALUES (?, ?, ?)'
-      )
-      .run(sub.email, sub.webhookUrl, now);
+    let result: Database.RunResult;
+    try {
+      result = this.db
+        .prepare(
+          'INSERT INTO subscriptions (email, webhook_url, created_at) VALUES (?, ?, ?)'
+        )
+        .run(sub.email, sub.webhookUrl, now);
+    } catch (err) {
+      // Guard against races that slip past the pre-check: the UNIQUE index
+      // on (email, webhook_url) will reject the insert.
+      if (
+        err instanceof Error &&
+        /UNIQUE constraint failed/i.test(err.message)
+      ) {
+        throw new DuplicateSubscriptionError(sub.email, sub.webhookUrl);
+      }
+      throw err;
+    }
 
     return {
       id: result.lastInsertRowid as number,
       email: sub.email,
       webhookUrl: sub.webhookUrl,
+      contractId: sub.contractId,
       createdAt: now,
     };
   }

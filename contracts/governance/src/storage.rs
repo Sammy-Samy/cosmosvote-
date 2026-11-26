@@ -51,6 +51,8 @@ pub enum InstanceKey {
     Paused,
     /// Basis-points threshold for vote-concentration circuit breaker (0 = disabled).
     ConcentrationThresholdBps,
+    /// Configurable maximum number of simultaneously active proposals.
+    MaxActiveProposals,
 }
 
 #[soroban_sdk::contracttype]
@@ -81,6 +83,37 @@ impl GovernanceStorage {
         env.storage()
             .persistent()
             .extend_ttl(key, Self::PERSISTENT_THRESHOLD, Self::PERSISTENT_BUMP_AMOUNT);
+    }
+
+    /// Extend the TTL of the persistent proposal entry so it survives until
+    /// `end_time` plus a 30-day safety buffer.
+    ///
+    /// The bump amount is computed from the current ledger timestamp to
+    /// `end_time + 30 days`, converted to ledgers at ~5 s/ledger, and is never
+    /// smaller than `PERSISTENT_BUMP_AMOUNT`. The threshold is capped at the
+    /// bump amount so the extension is always applied when needed.
+    pub fn bump_proposal_ttl(env: &Env, id: u64, end_time: u64) {
+        const SECONDS_PER_LEDGER: u64 = 5;
+        const THIRTY_DAYS_SECS: u64 = 30 * 24 * 60 * 60;
+
+        let now = env.ledger().timestamp();
+        let target = end_time.saturating_add(THIRTY_DAYS_SECS);
+        let remaining_secs = target.saturating_sub(now);
+        let required_ledgers = remaining_secs
+            .saturating_add(SECONDS_PER_LEDGER - 1)
+            .saturating_div(SECONDS_PER_LEDGER);
+
+        let bump_amount = if required_ledgers > u32::MAX as u64 {
+            u32::MAX
+        } else {
+            (required_ledgers as u32).max(Self::PERSISTENT_BUMP_AMOUNT)
+        };
+        let threshold = Self::PERSISTENT_THRESHOLD.min(bump_amount);
+
+        let key = PersistentKey::Proposal(id);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, threshold, bump_amount);
     }
     // --- Instance ---
 
@@ -193,6 +226,20 @@ impl GovernanceStorage {
         env.storage()
             .instance()
             .set(&InstanceKey::ConcentrationThresholdBps, &v);
+    }
+
+    /// Returns the maximum number of simultaneously active proposals.
+    /// Defaults to `MAX_ACTIVE_PROPOSALS` when not explicitly configured.
+    pub fn max_active_proposals(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&InstanceKey::MaxActiveProposals)
+            .unwrap_or(crate::MAX_ACTIVE_PROPOSALS)
+    }
+    pub fn set_max_active_proposals(env: &Env, v: u32) {
+        env.storage()
+            .instance()
+            .set(&InstanceKey::MaxActiveProposals, &v);
     }
 
     // --- Persistent ---

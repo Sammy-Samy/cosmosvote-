@@ -35,6 +35,31 @@ const migration: Migration = {
     );
 
     -- -----------------------------------------------------------------------
+    -- Deduplicate existing subscription rows.
+    -- Keeps the earliest row (lowest id / created_at) for each
+    -- (email, webhook_url) pair and removes the rest.
+    -- -----------------------------------------------------------------------
+    DELETE FROM subscriptions
+    WHERE id NOT IN (
+      SELECT id FROM (
+        SELECT
+          id,
+          ROW_NUMBER() OVER (
+            PARTITION BY email, webhook_url
+            ORDER BY created_at ASC, id ASC
+          ) AS rn
+        FROM subscriptions
+      )
+      WHERE rn = 1
+    );
+
+    -- -----------------------------------------------------------------------
+    -- Enforce uniqueness of (email, webhook_url) at the database level.
+    -- -----------------------------------------------------------------------
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_subscriptions_email_webhook
+      ON subscriptions (email, webhook_url);
+
+    -- -----------------------------------------------------------------------
     -- Events table
     -- Indexed governance contract events fetched from Horizon / Soroban RPC.
     -- Used for replay, audit, and idempotency checking.
@@ -56,9 +81,27 @@ const migration: Migration = {
       wallet_address  TEXT    PRIMARY KEY,
       claimed_at_ms   INTEGER NOT NULL
     );
+
+    -- -----------------------------------------------------------------------
+    -- Seen events table
+    -- Deduplication records for the contract event watcher. Each row is a
+    -- (ledger sequence, transaction hash) pair already processed, so replays
+    -- after restarts or ledger reorgs are silently skipped.
+    -- -----------------------------------------------------------------------
+    CREATE TABLE IF NOT EXISTS seen_events (
+      ledger_sequence INTEGER NOT NULL,
+      tx_hash         TEXT    NOT NULL,
+      created_at      INTEGER NOT NULL DEFAULT (unixepoch()),
+      PRIMARY KEY (ledger_sequence, tx_hash)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_seen_events_created_at
+      ON seen_events (created_at);
   `,
 
   down: `
+    DROP INDEX IF EXISTS idx_seen_events_created_at;
+    DROP TABLE IF EXISTS seen_events;
     DROP TABLE IF EXISTS faucet_claims;
     DROP TABLE IF EXISTS events;
     DROP TABLE IF EXISTS subscriptions;

@@ -84,4 +84,123 @@ describe('loadEnv', () => {
     loadEnv();
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
+
+  it('applies defaults for audit log rotation vars', () => {
+    const { loadEnv } = loadWithEnv(REQUIRED);
+    const env = loadEnv();
+    expect(env.AUDIT_LOG_MAX_BYTES).toBe(100 * 1024 * 1024);
+    expect(env.AUDIT_LOG_RETENTION_DAYS).toBe(30);
+  });
+
+  it('accepts custom audit log rotation vars', () => {
+    const { loadEnv } = loadWithEnv({
+      ...REQUIRED,
+      AUDIT_LOG_MAX_BYTES: '1024',
+      AUDIT_LOG_RETENTION_DAYS: '7',
+    });
+    const env = loadEnv();
+    expect(env.AUDIT_LOG_MAX_BYTES).toBe(1024);
+    expect(env.AUDIT_LOG_RETENTION_DAYS).toBe(7);
+  });
+});
+
+describe('loadEnv faucet secret source validation', () => {
+  let exitSpy: jest.SpyInstance;
+  let stderrSpy: jest.SpyInstance;
+
+  const FAUCET_VARS = [
+    'FAUCET_ENABLED',
+    'FAUCET_SECRET_KEY_FILE',
+    'FAUCET_SECRET_KEY_AWS_SECRET_ID',
+    'FAUCET_SECRET_KEY',
+  ] as const;
+
+  const SECRET_VALUE = 'SFAUCETSUPERSECRETVALUE1234567890';
+
+  beforeEach(() => {
+    exitSpy = jest.spyOn(process, 'exit').mockImplementation((() => {}) as never);
+    stderrSpy = jest.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    delete process.env.GOVERNANCE_CONTRACT_ID;
+    delete process.env.WEBHOOK_URL;
+    for (const key of FAUCET_VARS) delete process.env[key];
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    jest.resetModules();
+    for (const key of FAUCET_VARS) delete process.env[key];
+  });
+
+  function stderrOutput(): string {
+    return stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+  }
+
+  it('exits when FAUCET_ENABLED=true and no secret source is set', () => {
+    const { loadEnv } = loadWithEnv({ ...REQUIRED, FAUCET_ENABLED: 'true' });
+    loadEnv();
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(stderrOutput()).toMatch(/FAUCET_SECRET_KEY_FILE/);
+  });
+
+  it('exits when more than one secret source is set', () => {
+    const { loadEnv } = loadWithEnv({
+      ...REQUIRED,
+      FAUCET_ENABLED: 'true',
+      FAUCET_SECRET_KEY_FILE: '/run/secrets/faucet.key',
+      FAUCET_SECRET_KEY: SECRET_VALUE,
+    });
+    loadEnv();
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(stderrOutput()).toMatch(/exactly one/i);
+  });
+
+  it('does not leak the secret value in stderr output', () => {
+    const { loadEnv } = loadWithEnv({
+      ...REQUIRED,
+      FAUCET_ENABLED: 'true',
+      FAUCET_SECRET_KEY_FILE: '/run/secrets/faucet.key',
+      FAUCET_SECRET_KEY: SECRET_VALUE,
+    });
+    loadEnv();
+    expect(stderrOutput()).not.toContain(SECRET_VALUE);
+  });
+
+  it('succeeds when exactly one secret source is set (file)', () => {
+    const { loadEnv } = loadWithEnv({
+      ...REQUIRED,
+      FAUCET_ENABLED: 'true',
+      FAUCET_SECRET_KEY_FILE: '/run/secrets/faucet.key',
+    });
+    const env = loadEnv();
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(env.FAUCET_SECRET_KEY_FILE).toBe('/run/secrets/faucet.key');
+  });
+
+  it('succeeds when exactly one secret source is set (AWS Secrets Manager)', () => {
+    const { loadEnv } = loadWithEnv({
+      ...REQUIRED,
+      FAUCET_ENABLED: 'true',
+      FAUCET_SECRET_KEY_AWS_SECRET_ID: 'faucet/signing-key',
+    });
+    const env = loadEnv();
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(env.FAUCET_SECRET_KEY_AWS_SECRET_ID).toBe('faucet/signing-key');
+  });
+
+  it('succeeds when exactly one secret source is set (env var fallback)', () => {
+    const { loadEnv } = loadWithEnv({
+      ...REQUIRED,
+      FAUCET_ENABLED: 'true',
+      FAUCET_SECRET_KEY: SECRET_VALUE,
+    });
+    const env = loadEnv();
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(env.FAUCET_SECRET_KEY).toBe(SECRET_VALUE);
+  });
+
+  it('does not require a secret source when FAUCET_ENABLED is not true', () => {
+    const { loadEnv } = loadWithEnv({ ...REQUIRED, FAUCET_ENABLED: 'false' });
+    loadEnv();
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
 });

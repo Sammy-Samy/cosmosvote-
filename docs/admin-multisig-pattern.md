@@ -168,6 +168,67 @@ gov.accept_admin(wrongAddress)  // Error if not the pending admin
 gov.transfer_admin(nonAdmin, address)  // Error if not current admin
 ```
 
+## Treasury Multisig Example
+
+The treasury contract only authorizes a single `governance` address for disbursements. A DAO that wants an additional multisig veto on treasury spending can set that `governance` address to a **two-of-three multisig account**. Every disbursement then requires both a passed governance proposal *and* two of the three multisig signers.
+
+### Configuration
+
+```javascript
+// 1. Create a 2-of-3 multisig account to act as the treasury governance address
+const treasuryGovernance = new StrKey.Account('G...');
+
+// Three signers, each with weight 1; threshold 2 means any two can approve
+multisigOp.addSigner(signerA, 1);
+multisigOp.addSigner(signerB, 1);
+multisigOp.addSigner(signerC, 1);
+multisigOp.setThreshold(2);  // medium threshold = 2
+
+// 2. Point the treasury at the multisig account as its governance address
+treasury.initialize({
+  admin: adminEOA,
+  governance: treasuryGovernance,  // 2-of-3 multisig
+  // ... other parameters
+});
+```
+
+### Disbursement Flow
+
+1. **Proposal passes** — the governance contract records an approved proposal authorizing a treasury disbursement.
+2. **Disbursement is submitted** — the disbursement call is authorized by `treasuryGovernance` (the multisig account), not by a single key.
+3. **Multisig approval** — the transaction must carry two of the three signer signatures before the treasury accepts it. A single signer cannot move funds even with a passed proposal.
+4. **Funds released** — only after both conditions hold does the treasury transfer funds.
+
+```javascript
+// The disbursement transaction is signed by two of the three multisig signers
+const tx = new TransactionBuilder(treasuryGovernance, { fee })
+  .addOperation(treasury.disburse({
+    governance: treasuryGovernance,
+    recipient: recipientAddress,
+    amount: 1000n
+  }))
+  .build();
+
+// Collect signatures from any two signers (e.g. signerA and signerC)
+tx.sign(signerAKeypair);
+tx.sign(signerCKeypair);
+await server.submitTransaction(tx);
+```
+
+### Veto Behavior
+
+Because the treasury requires the multisig account's authorization, **any single signer can veto a disbursement by withholding their signature**. Even if a proposal has passed governance, the disbursement cannot execute unless two signers co-sign. This gives the DAO a second, independent check on treasury outflows:
+
+- A compromised or malicious governance majority cannot drain the treasury alone.
+- A single compromised signer cannot approve a disbursement alone (two signatures required).
+- Rotating signers or changing the threshold is itself a multisig operation, so control of the veto cannot be seized unilaterally.
+
+### Threat Model Notes
+
+- **Governance compromise**: a passed proposal still needs two multisig signatures, so treasury funds are not lost to a single compromised governance key.
+- **Signer compromise**: one compromised signer is insufficient to disburse (2-of-3), but two compromised signers defeat the veto — choose signers with independent key custody.
+- **Signer loss**: losing one signer still leaves a quorum; losing two blocks all disbursements until signers are rotated.
+
 ## See Also
 
 - [Stellar Multisig Documentation](https://developers.stellar.org/learn/expert/multisig)
