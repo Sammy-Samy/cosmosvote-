@@ -36,7 +36,7 @@ fn setup(env: &Env) -> (GovernanceContractClient<'_>, TokenContractClient<'_>, A
 
     let gov_id = env.register(GovernanceContract, ());
     let gov = GovernanceContractClient::new(env, &gov_id);
-    gov.initialize(&admin, &token_id, &0i128, &0u64, &0u32, &false, &None, &0u32);
+    gov.initialize(&admin, &token_id, &0i128, &0u64, &0u32, &false, &None, &0u32, &0u32);
 
     (gov, token, admin, voter, voter2)
 }
@@ -583,6 +583,7 @@ fn test_vote_uses_snapshot_balance() {
         &1i128,
         &3600u64,
         &None,
+        &None,
     );
 
     // Mint more tokens after proposal creation
@@ -757,6 +758,60 @@ fn test_change_vote_same_vote_fails() {
     assert_eq!(result, Err(Ok(ContractError::VoteAlreadySame)));
 }
 
+/// Issue #468: casting the same vote value twice must fail with `VoteAlreadySame`
+/// (error 29) rather than silently succeeding or double-counting weight.
+#[test]
+fn test_cast_vote_same_value_twice_fails_with_vote_already_same() {
+    let env = Env::default();
+    let (gov, _, _, voter, _) = setup(&env);
+    let id = make_proposal(&gov, &env, &voter);
+
+    gov.cast_vote(&voter, &id, &Vote::Yes);
+
+    // Re-casting the identical vote value is rejected with VoteAlreadySame.
+    let result = gov.try_cast_vote(&voter, &id, &Vote::Yes);
+    assert_eq!(result, Err(Ok(ContractError::VoteAlreadySame)));
+
+    // Tallies are unchanged — the duplicate vote was not counted.
+    let proposal = gov.get_proposal(&id);
+    assert_eq!(proposal.votes_yes, 10_000_000);
+    assert_eq!(proposal.votes_no, 0);
+    assert_eq!(proposal.votes_abstain, 0);
+    assert_eq!(proposal.voter_count, 1);
+}
+
+/// Issue #468: vote changes are NOT supported. Attempting to change an existing
+/// vote to a different value is rejected with `VoteAlreadySame` (error 29);
+/// voters must retract their vote first and then cast a new one.
+#[test]
+fn test_cast_vote_change_to_different_value_fails_with_vote_already_same() {
+    let env = Env::default();
+    let (gov, _, _, voter, _) = setup(&env);
+    let id = make_proposal(&gov, &env, &voter);
+
+    gov.cast_vote(&voter, &id, &Vote::Yes);
+
+    // Changing Yes -> No is not supported.
+    let result = gov.try_cast_vote(&voter, &id, &Vote::No);
+    assert_eq!(result, Err(Ok(ContractError::VoteAlreadySame)));
+
+    // Original vote and tallies remain intact.
+    let record = gov.get_vote(&id, &voter);
+    assert_eq!(record.vote, Vote::Yes);
+    let proposal = gov.get_proposal(&id);
+    assert_eq!(proposal.votes_yes, 10_000_000);
+    assert_eq!(proposal.votes_no, 0);
+
+    // The supported path is retract-then-revote.
+    gov.retract_vote(&voter, &id);
+    gov.cast_vote(&voter, &id, &Vote::No);
+    let record = gov.get_vote(&id, &voter);
+    assert_eq!(record.vote, Vote::No);
+    let proposal = gov.get_proposal(&id);
+    assert_eq!(proposal.votes_yes, 0);
+    assert_eq!(proposal.votes_no, 10_000_000);
+}
+
 #[test]
 fn test_change_vote_not_voted_fails() {
     let env = Env::default();
@@ -830,7 +885,7 @@ fn test_finalise_repeated_call_returns_not_active() {
 fn test_finalise_tie_rejected() {
     let env = Env::default();
     let (gov, token, admin, voter, voter2) = setup(&env);
-    // Make equal balances
+    // Make equal balances BEFORE the proposal snapshot is taken
     token.mint(&admin, &voter2, &5_000_000i128); // voter2 now has 10M
     let id = gov.create_proposal(
         &voter,
@@ -1542,6 +1597,121 @@ fn test_execute_with_treasury_action() {
     assert_eq!(p.state, ProposalState::Passed);
 }
 
+#[test]
+fn test_execute_cross_contract_failure_marks_execution_failed() {
+    use crate::types::{TreasuryAction, TreasuryAsset};
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let voter = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let token_id = env.register(cosmosvote_token::TokenContract, ());
+    let token = cosmosvote_token::TokenContractClient::new(&env, &token_id);
+    token.initialize(&admin, &1_000_000_000i128, &String::from_str(&env, "CosmosVote"), &String::from_str(&env, "VOTE"), &7u32);
+    token.mint(&admin, &voter, &10_000_000i128);
+
+    let gov_id = env.register(GovernanceContract, ());
+    let gov = GovernanceContractClient::new(&env, &gov_id);
+
+    // Treasury is deployed but never funded, so the disbursement below will
+    // fail inside the cross-contract call (insufficient balance).
+    let treasury_id = env.register(cosmosvote_treasury::TreasuryContract, ());
+    let treasury = cosmosvote_treasury::TreasuryContractClient::new(&env, &treasury_id);
+    treasury.initialize(&gov_id);
+
+    gov.initialize(&admin, &token_id, &0i128, &0u64, &0u32, &false, &Some(treasury_id), &0u32);
+
+    let action = TreasuryAction {
+        recipient: recipient.clone(),
+        amount: 1_000i128,
+        asset: TreasuryAsset::Token(token_id.clone()),
+    };
+
+    let id = gov.create_proposal(
+        &voter,
+        &String::from_str(&env, "Underfunded Disbursement"),
+        &String::from_str(&env, "Transfer 1000 tokens treasury does not hold"),
+        &5_000_000i128,
+        &604_800u64,
+        &None,
+        &Some(action),
+    );
+
+    gov.cast_vote(&voter, &id, &Vote::Yes);
+    let proposal = gov.get_proposal(&id);
+    env.ledger().with_mut(|l| l.timestamp = proposal.end_time + 1);
+    gov.finalise(&id);
+    assert_eq!(gov.get_proposal(&id).state, ProposalState::Passed);
+
+    let result = gov.try_execute(&admin, &id);
+    assert!(result.is_err(), "execute should surface the cross-contract failure");
+    assert_eq!(gov.get_proposal(&id).state, ProposalState::ExecutionFailed);
+
+    // Admin can retry execute() after the underlying issue (e.g. funding the
+    // treasury) is resolved — here we just confirm the retry path is open,
+    // i.e. execute is callable again from ExecutionFailed rather than being
+    // permanently stuck.
+    let retry = gov.try_execute(&admin, &id);
+    assert!(retry.is_err());
+    assert_eq!(gov.get_proposal(&id).state, ProposalState::ExecutionFailed);
+}
+
+// ---------------------------------------------------------------------------
+// Treasury action list length limit (issue #440)
+// ---------------------------------------------------------------------------
+
+fn make_treasury_actions(env: &Env, count: u32, asset: &Address) -> soroban_sdk::Vec<TreasuryAction> {
+    let mut actions = soroban_sdk::Vec::new(env);
+    for _ in 0..count {
+        actions.push_back(TreasuryAction {
+            recipient: Address::generate(env),
+            amount: 1_000i128,
+            asset: TreasuryAsset::Token(asset.clone()),
+        });
+    }
+    actions
+}
+
+#[test]
+fn test_create_proposal_accepts_exactly_max_treasury_actions() {
+    let env = Env::default();
+    let (gov, token, _, voter, _) = setup(&env);
+    let actions = make_treasury_actions(&env, 10, &token.address);
+
+    let id = gov.create_proposal(
+        &voter,
+        &String::from_str(&env, "Max Treasury Actions"),
+        &String::from_str(&env, "Exactly the maximum number of treasury actions"),
+        &5_000_000i128,
+        &604_800u64,
+        &None,
+        &Some(actions.clone()),
+    );
+
+    let proposal = gov.get_proposal(&id);
+    assert_eq!(proposal.treasury_action.len(), 10);
+}
+
+#[test]
+fn test_create_proposal_rejects_too_many_treasury_actions() {
+    let env = Env::default();
+    let (gov, token, _, voter, _) = setup(&env);
+    let actions = make_treasury_actions(&env, 11, &token.address);
+
+    let result = gov.try_create_proposal(
+        &voter,
+        &String::from_str(&env, "Too Many Treasury Actions"),
+        &String::from_str(&env, "One more than the maximum number of treasury actions"),
+        &5_000_000i128,
+        &604_800u64,
+        &None,
+        &Some(actions),
+    );
+    assert_eq!(result, Err(Ok(ContractError::TooManyTreasuryActions)));
+}
+
 // ---------------------------------------------------------------------------
 // amend_proposal
 // ---------------------------------------------------------------------------
@@ -1757,6 +1927,176 @@ fn test_proposal_count_persisted() {
     assert_eq!(gov.proposal_count(), 3);
 }
 
+/// Issue #442: proposal_count() query returns the current ProposalCount.
+#[test]
+fn test_proposal_count_query() {
+    let env = Env::default();
+    let (gov, _, _, voter, _) = setup(&env);
+
+    // No proposals yet
+    assert_eq!(gov.proposal_count(), 0u64);
+
+    // Count increments by one for each created proposal
+    make_proposal(&gov, &env, &voter);
+    assert_eq!(gov.proposal_count(), 1u64);
+
+    make_proposal(&gov, &env, &voter);
+    assert_eq!(gov.proposal_count(), 2u64);
+
+    make_proposal(&gov, &env, &voter);
+    assert_eq!(gov.proposal_count(), 3u64);
+}
+
+/// Issue #443: get_config() exposes all governance parameters.
+#[test]
+fn test_get_config_returns_all_governance_params() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let voter = Address::generate(&env);
+
+    let token_id = env.register(TokenContract, ());
+    let token = TokenContractClient::new(&env, &token_id);
+    token.initialize(
+        &admin,
+        &1_000_000_000i128,
+        &String::from_str(&env, "CosmosVote"),
+        &String::from_str(&env, "VOTE"),
+        &7u32,
+    );
+    token.mint(&admin, &voter, &10_000_000i128);
+
+    let gov_id = env.register(GovernanceContract, ());
+    let gov = GovernanceContractClient::new(&env, &gov_id);
+
+    let min_balance: i128 = 250_000;
+    let cooldown: u64 = 1_800;
+    let min_quorum_bps: u32 = 150; // 1.5%
+    let restrict_admin_vote: bool = true;
+    let concentration_threshold_bps: u32 = 4_000; // 40%
+
+    gov.initialize(
+        &admin,
+        &token_id,
+        &min_balance,
+        &cooldown,
+        &min_quorum_bps,
+        &restrict_admin_vote,
+        &None,
+        &concentration_threshold_bps,
+    );
+
+    let config = gov.get_config();
+    assert_eq!(config.admin, admin);
+    assert_eq!(config.voting_token, token_id);
+    assert_eq!(config.min_proposal_balance, min_balance);
+    assert_eq!(config.proposal_cooldown, cooldown);
+    assert_eq!(config.min_quorum_bps, min_quorum_bps);
+    assert_eq!(config.restrict_admin_vote, restrict_admin_vote);
+    assert_eq!(config.paused, false);
+}
+
+/// Issue #444: finalise() on a Passed proposal returns ProposalNotActive and does not mutate state.
+#[test]
+fn test_finalise_twice_on_passed_proposal_no_mutation() {
+    let env = Env::default();
+    let (gov, _, _, voter, voter2) = setup(&env);
+    let id = make_proposal(&gov, &env, &voter);
+    gov.cast_vote(&voter, &id, &Vote::Yes);
+    gov.cast_vote(&voter2, &id, &Vote::No);
+    let proposal = gov.get_proposal(&id);
+    env.ledger().with_mut(|l| l.timestamp = proposal.end_time + 1);
+
+    gov.finalise(&id);
+    let after_first = gov.get_proposal(&id);
+    assert_eq!(after_first.state, ProposalState::Passed);
+
+    let result = gov.try_finalise(&id);
+    assert_eq!(result, Err(Ok(ContractError::ProposalNotActive)));
+
+    let after_second = gov.get_proposal(&id);
+    assert_eq!(after_second.state, ProposalState::Passed);
+    assert_eq!(after_second.votes_yes, after_first.votes_yes);
+    assert_eq!(after_second.votes_no, after_first.votes_no);
+    assert_eq!(after_second.votes_abstain, after_first.votes_abstain);
+    assert_eq!(after_second.voter_count, after_first.voter_count);
+}
+
+/// Issue #444: finalise() on a Rejected proposal returns ProposalNotActive and does not mutate state.
+#[test]
+fn test_finalise_twice_on_rejected_proposal_no_mutation() {
+    let env = Env::default();
+    let (gov, _, _, voter, voter2) = setup(&env);
+    let id = make_proposal(&gov, &env, &voter);
+    // voter2 votes No with 5M — quorum met but yes does not exceed no
+    gov.cast_vote(&voter2, &id, &Vote::No);
+    let proposal = gov.get_proposal(&id);
+    env.ledger().with_mut(|l| l.timestamp = proposal.end_time + 1);
+
+    gov.finalise(&id);
+    let after_first = gov.get_proposal(&id);
+    assert_eq!(after_first.state, ProposalState::Rejected);
+
+    let result = gov.try_finalise(&id);
+    assert_eq!(result, Err(Ok(ContractError::ProposalNotActive)));
+
+    let after_second = gov.get_proposal(&id);
+    assert_eq!(after_second.state, ProposalState::Rejected);
+    assert_eq!(after_second.votes_yes, after_first.votes_yes);
+    assert_eq!(after_second.votes_no, after_first.votes_no);
+    assert_eq!(after_second.votes_abstain, after_first.votes_abstain);
+    assert_eq!(after_second.voter_count, after_first.voter_count);
+}
+
+/// Issue #444: finalise() on an Executed proposal returns ProposalNotActive and does not mutate state.
+#[test]
+fn test_finalise_twice_on_executed_proposal_no_mutation() {
+    let env = Env::default();
+    let (gov, _, admin, voter, _) = setup(&env);
+    let id = make_proposal(&gov, &env, &voter);
+    gov.cast_vote(&voter, &id, &Vote::Yes);
+    let proposal = gov.get_proposal(&id);
+    env.ledger().with_mut(|l| l.timestamp = proposal.end_time + 1);
+
+    gov.finalise(&id);
+    gov.execute(&admin, &id);
+    let after_execute = gov.get_proposal(&id);
+    assert_eq!(after_execute.state, ProposalState::Executed);
+
+    let result = gov.try_finalise(&id);
+    assert_eq!(result, Err(Ok(ContractError::ProposalNotActive)));
+
+    let after_second = gov.get_proposal(&id);
+    assert_eq!(after_second.state, ProposalState::Executed);
+    assert_eq!(after_second.votes_yes, after_execute.votes_yes);
+    assert_eq!(after_second.votes_no, after_execute.votes_no);
+    assert_eq!(after_second.votes_abstain, after_execute.votes_abstain);
+    assert_eq!(after_second.voter_count, after_execute.voter_count);
+}
+
+/// Issue #444: finalise() on a Cancelled proposal returns ProposalNotActive and does not mutate state.
+#[test]
+fn test_finalise_twice_on_cancelled_proposal_no_mutation() {
+    let env = Env::default();
+    let (gov, _, admin, voter, _) = setup(&env);
+    let id = make_proposal(&gov, &env, &voter);
+    gov.cast_vote(&voter, &id, &Vote::Yes);
+    gov.cancel(&admin, &id, &None);
+    let after_cancel = gov.get_proposal(&id);
+    assert_eq!(after_cancel.state, ProposalState::Cancelled);
+
+    let result = gov.try_finalise(&id);
+    assert_eq!(result, Err(Ok(ContractError::ProposalNotActive)));
+
+    let after_second = gov.get_proposal(&id);
+    assert_eq!(after_second.state, ProposalState::Cancelled);
+    assert_eq!(after_second.votes_yes, after_cancel.votes_yes);
+    assert_eq!(after_second.votes_no, after_cancel.votes_no);
+    assert_eq!(after_second.votes_abstain, after_cancel.votes_abstain);
+    assert_eq!(after_second.voter_count, after_cancel.voter_count);
+}
+
 // ---------------------------------------------------------------------------
 // Issue #1: Update Voting Token
 // ---------------------------------------------------------------------------
@@ -1847,6 +2187,67 @@ fn test_active_proposal_limit() {
     assert_eq!(result, Err(Ok(ContractError::ProposalsStillActive)));
 }
 
+#[test]
+fn test_create_proposal_rejected_at_active_limit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let voter = Address::generate(&env);
+
+    let token_id = env.register(TokenContract, ());
+    let token = TokenContractClient::new(&env, &token_id);
+    token.initialize(&admin, &1_000_000_000i128, &String::from_str(&env, "CosmosVote"), &String::from_str(&env, "VOTE"), &7u32);
+    token.mint(&admin, &voter, &10_000_000i128);
+
+    let gov_id = env.register(GovernanceContract, ());
+    let gov = GovernanceContractClient::new(&env, &gov_id);
+    // max_active_proposals = 2
+    gov.initialize(&admin, &token_id, &0i128, &0u64, &0u32, &false, &None, &0u32, &2u32);
+
+    // Fill up to the limit
+    make_proposal(&gov, &env, &voter);
+    make_proposal(&gov, &env, &voter);
+
+    // Next proposal should be rejected
+    let result = gov.try_create_proposal(
+        &voter,
+        &String::from_str(&env, "Over Limit"),
+        &String::from_str(&env, "This should fail"),
+        &1_000_000i128,
+        &3600u64,
+        &None,
+        &None,
+    );
+    assert_eq!(result, Err(Ok(ContractError::ProposalsStillActive)));
+}
+
+// ---------------------------------------------------------------------------
+// get_vote_record query (#449)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_vote_record_voted() {
+    let env = Env::default();
+    let (gov, _, _, voter, _) = setup(&env);
+    let id = make_proposal(&gov, &env, &voter);
+    gov.cast_vote(&voter, &id, &Vote::Yes);
+
+    let record = gov.get_vote_record(&id, &voter);
+    assert!(record.is_some());
+    let record = record.unwrap();
+    assert_eq!(record.vote, Vote::Yes);
+    assert_eq!(record.weight, 10_000_000);
+}
+
+#[test]
+fn test_get_vote_record_not_voted() {
+    let env = Env::default();
+    let (gov, _, _, voter, _) = setup(&env);
+    let id = make_proposal(&gov, &env, &voter);
+
+    assert_eq!(gov.get_vote_record(&id, &voter), None);
+}
+
 // ---------------------------------------------------------------------------
 // Multi-choice proposal tests (#298)
 // ---------------------------------------------------------------------------
@@ -1856,6 +2257,7 @@ fn test_multi_choice_proposal_passes_with_winner() {
     let env = Env::default();
     let (gov, token, admin, voter, voter2) = setup(&env);
     let voter3 = Address::generate(&env);
+    // Minted before proposal creation so the snapshot captures the balance.
     token.mint(&admin, &voter3, &2_000_000i128);
 
     let mut choices = soroban_sdk::Vec::new(&env);
@@ -2019,6 +2421,68 @@ fn test_set_proposal_cooldown_non_admin_fails() {
     assert_eq!(result, Err(Ok(ContractError::NotAdmin)));
 }
 
+// ---------------------------------------------------------------------------
+// Issue #460: update_proposal_cooldown
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_update_proposal_cooldown_succeeds_for_admin() {
+    let env = Env::default();
+    let (gov, _, admin, _, _) = setup(&env);
+    assert_eq!(gov.get_config().proposal_cooldown, 0u64);
+
+    gov.update_proposal_cooldown(&admin, &7_200u64);
+    assert_eq!(gov.get_config().proposal_cooldown, 7_200u64);
+
+    // Updating again overwrites the previous value.
+    gov.update_proposal_cooldown(&admin, &1_800u64);
+    assert_eq!(gov.get_config().proposal_cooldown, 1_800u64);
+}
+
+#[test]
+fn test_update_proposal_cooldown_non_admin_fails() {
+    let env = Env::default();
+    let (gov, _, _, voter, _) = setup(&env);
+    let result = gov.try_update_proposal_cooldown(&voter, &7_200u64);
+    assert_eq!(result, Err(Ok(ContractError::NotAdmin)));
+    // Value must remain unchanged after a rejected call.
+    assert_eq!(gov.get_config().proposal_cooldown, 0u64);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #458: Treasury recipient validation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_create_proposal_rejects_zero_address_treasury_recipient() {
+    let env = Env::default();
+    let (gov, _, _, voter, _) = setup(&env);
+
+    // The all-zeros Stellar public key — no valid keypair can sign for it.
+    let zero_addr = Address::from_string(
+        &String::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"),
+    );
+
+    let action = TreasuryAction {
+        recipient: zero_addr,
+        amount: 1_000i128,
+        asset: TreasuryAsset::Token(gov.get_config().voting_token),
+    };
+
+    let result = gov.try_create_proposal(
+        &voter,
+        &String::from_str(&env, "Treasury Disbursement"),
+        &String::from_str(&env, "Attempt to disburse to the zero address"),
+        &5_000_000i128,
+        &604_800u64,
+        &None,
+        &Some(action),
+    );
+    assert_eq!(result, Err(Ok(ContractError::InvalidRecipient)));
+    // No proposal should have been created.
+    assert_eq!(gov.proposal_count(), 0u64);
+}
+
 #[test]
 fn test_set_restrict_admin_vote() {
     let env = Env::default();
@@ -2073,6 +2537,7 @@ fn test_circuit_breaker_below_threshold_passes() {
     let (gov, token, admin, voter, _) = setup_with_threshold(&env, 5000u32);
 
     // Give voter 40% of supply (400M / 1B = 40%) — below 50% threshold
+    // Minted before proposal creation so the snapshot captures the balance.
     token.mint(&admin, &voter, &400_000_000i128);
 
     let id = gov.create_proposal(
@@ -2100,6 +2565,7 @@ fn test_circuit_breaker_above_threshold_pauses() {
     let (gov, token, admin, voter, _) = setup_with_threshold(&env, 5000u32);
 
     // Give voter 60% of supply — above 50% threshold
+    // Minted before proposal creation so the snapshot captures the balance.
     token.mint(&admin, &voter, &600_000_000i128);
 
     let id = gov.create_proposal(
@@ -2132,6 +2598,7 @@ fn test_circuit_breaker_at_threshold_does_not_pause() {
     // Use supply of exactly 1_000_000_000. Give voter exactly 500_000_000 (50%).
     // 500M * 10_000 = 5_000_000_000_000 == 5000 * 1_000_000_000 = 5_000_000_000_000
     // lhs == rhs → NOT strictly greater, so no pause.
+    // Minted before proposal creation so the snapshot captures the balance.
     token.mint(&admin, &voter, &500_000_000i128);
 
     let id = gov.create_proposal(
@@ -2157,6 +2624,7 @@ fn test_circuit_breaker_threshold_zero_disables() {
     let (gov, token, admin, voter, _) = setup_with_threshold(&env, 0u32);
 
     // Give voter 100% of supply (well, admin already has 1B; mint more for voter)
+    // Minted before proposal creation so the snapshot captures the balance.
     token.mint(&admin, &voter, &900_000_000i128);
 
     let id = gov.create_proposal(

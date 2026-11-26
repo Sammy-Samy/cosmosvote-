@@ -6,6 +6,12 @@ New contributors can start with the step-by-step
 [First-Time Contributor Onboarding Guide](docs/ONBOARDING.md), including setup,
 tests, linting, and a local proposal walkthrough.
 
+For platform-specific local development setup — prerequisites and version
+requirements, known issues, and workarounds for **macOS**, **Linux**, and
+**Windows/WSL2** — see [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md).
+Review the notes for your platform before running `make fmt`, `make lint`,
+`make test`, or `make build`.
+
 ## Code of Conduct
 
 Be respectful, inclusive, and constructive. We follow the [Contributor Covenant](https://www.contributor-covenant.org/).
@@ -30,7 +36,9 @@ Open a GitHub Discussion or Issue tagged `enhancement`. Describe the use case an
 2. **Clone** your fork: `git clone https://github.com/your-username/cosmosvote.git`
 3. **Create a branch**: `git checkout -b feat/your-feature-name`
 4. **Make your changes**
-5. **Run the full check suite**:
+5. **Run the full check suite** (see
+   [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) for platform-specific
+   setup and known issues on macOS, Linux, and Windows/WSL2):
    ```bash
    make fmt
    make lint
@@ -55,6 +63,13 @@ Open a GitHub Discussion or Issue tagged `enhancement`. Describe the use case an
 - Add new errors to `contracts/<contract>/src/types.rs` when needed.
 - Add on-chain events in `contracts/<contract>/src/events.rs` for state changes.
 - Privileged functions must call `require_auth()` and validate inputs.
+
+### Adding a new `ContractError` variant
+- Every new variant added to `ContractError` in `contracts/<contract>/src/types.rs` **must** ship with a corresponding test in `contracts/<contract>/src/error_coverage_tests.rs`.
+- The test must exercise the error path and assert the variant's **exact numeric code** (e.g. `assert_eq!(err, ContractError::Foo as u32)`), so that accidental changes to error discriminants are caught.
+- The CI coverage gate enforces **100% error-variant coverage**: a PR that adds a `ContractError` variant without a matching test in `error_coverage_tests.rs` will fail CI and cannot be merged.
+- When adding a variant, also update the coverage report/checklist so the new variant is listed as covered.
+======
 
 ### Writing unit tests
 - Add unit tests in `contracts/<contract>/src/test.rs`.
@@ -85,11 +100,13 @@ Open a GitHub Discussion or Issue tagged `enhancement`. Describe the use case an
 - [ ] Input validation is implemented for all new functions
 - [ ] State updates are covered by unit tests
 - [ ] Failure cases are covered by `try_*` tests
+- [ ] Every new `ContractError` variant has a test in `error_coverage_tests.rs` asserting its exact numeric code (100% error-variant coverage)
 - [ ] Property tests are added or updated for contract invariants
 - [ ] Events are emitted for relevant state changes
 - [ ] Storage schema changes are tracked in storage helpers
 - [ ] Documentation and README are updated if needed
 - [ ] `make fmt`, `make lint`, and `make test` pass
+- [ ] Platform-specific setup notes in `docs/GETTING_STARTED.md` are updated if the change affects local development on macOS, Linux, or Windows/WSL2
 
 ## Pull Request Requirements
 
@@ -298,6 +315,9 @@ updated stuff
 - Keep PRs focused — one issue or feature per PR.
 - Self-review your diff before requesting review.
 - Ensure `make fmt`, `make lint`, and `make test` all pass locally before pushing.
+- If you develop on macOS or Windows/WSL2, confirm your environment matches the
+  prerequisites in [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) and note
+  any platform-specific workarounds you used in the PR description.
 
 ### Lint Rules Summary
 
@@ -317,13 +337,26 @@ updated stuff
 - Test both success and failure paths for every public function
 - **Coverage Target:** All contributions must maintain at least **80% code coverage**. The CI will fail if coverage drops below this threshold.
 
-## Postmortems
+### Error code snapshots
 
-When an incident occurs (e.g. a production outage, a failed deployment, or a security-relevant event), a postmortem is written after the incident is resolved.
+Error code integers are part of the public API — clients rely on them to interpret failures. To prevent accidental renumbering, the mapping from every `ContractError` variant to its `u32` discriminant is pinned in a snapshot file:
 
-- **Process:** See [docs/runbook.md](docs/runbook.md) for when a postmortem is required, who approves it, and where it is published.
-- **Template:** Start from [docs/postmortem-template.md](docs/postmortem-template.md), which includes sections for the timeline, contributing factors, and action items.
-- **Action items:** Every action item from a postmortem is tracked as a GitHub issue with the `postmortem` label so it can be prioritized and followed up.
+```
+contracts/governance/test_snapshots/error_codes.snap
+```
+
+- The snapshot lists every `ContractError` variant and its `u32` discriminant.
+- CI runs the snapshot test and **fails if any discriminant changes** or a variant is added/removed without updating the snapshot.
+- If you intentionally add, remove, or renumber an error code, regenerate the snapshot and commit it alongside your change:
+
+  ```bash
+  cargo test -p governance error_codes_snapshot
+  # or, to update all snapshots:
+  UPDATE_SNAPSHOTS=1 cargo test -p governance
+  ```
+
+- Review the snapshot diff carefully before committing — an unintended change means a client could silently interpret the wrong error.
+- Never edit `error_codes.snap` by hand; always regenerate it from `types.rs`.
 
 ## Security
 

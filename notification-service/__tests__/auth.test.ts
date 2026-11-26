@@ -10,6 +10,9 @@
 import { resolveRole, hasRole, requireRole } from '../src/auth';
 import { createHmac } from 'crypto';
 import { signWebhookPayload, verifyWebhookSignature } from '../src/webhook-signing';
+import { createServer, Server } from 'http';
+import { AddressInfo } from 'net';
+import { applyBodySizeLimit, getMaxBodyBytes } from '../src/body-limit';
 
 // ---------------------------------------------------------------------------
 // resolveRole
@@ -192,5 +195,67 @@ describe('verifyWebhookSignature', () => {
   it('rejects a missing signature', () => {
     const { timestamp } = signWebhookPayload(body, secret);
     expect(verifyWebhookSignature(body, undefined as any, timestamp, secret)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// body size limit (Issue #423)
+// ---------------------------------------------------------------------------
+
+describe('body size limit', () => {
+  const originalEnv = process.env;
+  let server: Server;
+  let baseUrl: string;
+
+  beforeEach((done) => {
+    jest.resetModules();
+    process.env = { ...originalEnv, MAX_BODY_BYTES: '1024' };
+    server = createServer((req, res) => {
+      applyBodySizeLimit(req, res, () => {
+        let data = '';
+        req.on('data', (chunk) => { data += chunk; });
+        req.on('end', () => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, length: data.length }));
+        });
+      });
+    });
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address() as AddressInfo;
+      baseUrl = `http://127.0.0.1:${port}`;
+      done();
+    });
+  });
+
+  afterEach((done) => {
+    process.env = originalEnv;
+    server.close(() => done());
+  });
+
+  it('returns 413 Payload Too Large for an oversized body', async () => {
+    const oversized = JSON.stringify({ payload: 'x'.repeat(4096) });
+    const res = await fetch(baseUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: oversized,
+    });
+    expect(res.status).toBe(413);
+  });
+
+  it('accepts a body under the configured limit', async () => {
+    const small = JSON.stringify({ payload: 'x'.repeat(100) });
+    const res = await fetch(baseUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: small,
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.ok).toBe(true);
+  });
+
+  it('defaults to 64 KB when MAX_BODY_BYTES is unset', () => {
+    delete process.env.MAX_BODY_BYTES;
+    expect(getMaxBodyBytes()).toBe(64 * 1024);
   });
 });

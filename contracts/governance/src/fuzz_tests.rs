@@ -301,6 +301,116 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
+// create_proposal boundary fuzz tests (issue #451)
+// ---------------------------------------------------------------------------
+//
+// These tests drive `create_proposal` with arbitrary boundary inputs for
+// title length, description length, quorum and duration. Each test is named
+// with the `fuzz_create_proposal` prefix so CI can select them by name.
+
+proptest! {
+    /// Random title lengths spanning empty, valid (1–128) and oversized (129+).
+    /// Valid lengths must be accepted; invalid ones must yield `InvalidTitle`.
+    #[test]
+    fn fuzz_create_proposal_title_lengths(len in 0usize..=(MAX_TITLE_LEN + 256)) {
+        let env = Env::default();
+        let (gov, proposer) = setup(&env);
+        let title = "t".repeat(len);
+        let result = gov.try_create_proposal(
+            &proposer,
+            &String::from_str(&env, &title),
+            &String::from_str(&env, "Valid description"),
+            &1_000_000i128,
+            &3_600u64,
+        );
+        if len == 0 || len > MAX_TITLE_LEN {
+            prop_assert!(
+                result == Err(Ok(ContractError::InvalidTitle)),
+                "title len={len} should return InvalidTitle"
+            );
+        } else {
+            prop_assert!(result.is_ok(), "valid title len={len} was rejected");
+        }
+    }
+
+    /// Random description lengths spanning empty, valid (1–1024) and
+    /// oversized (1025+). Valid lengths must be accepted; invalid ones must
+    /// yield `InvalidDescription`.
+    #[test]
+    fn fuzz_create_proposal_description_lengths(len in 0usize..=(MAX_DESC_LEN + 256)) {
+        let env = Env::default();
+        let (gov, proposer) = setup(&env);
+        let desc = "d".repeat(len);
+        let result = gov.try_create_proposal(
+            &proposer,
+            &String::from_str(&env, "Valid Title"),
+            &String::from_str(&env, &desc),
+            &1_000_000i128,
+            &3_600u64,
+        );
+        if len == 0 || len > MAX_DESC_LEN {
+            prop_assert!(
+                result == Err(Ok(ContractError::InvalidDescription)),
+                "description len={len} should return InvalidDescription"
+            );
+        } else {
+            prop_assert!(result.is_ok(), "valid description len={len} was rejected");
+        }
+    }
+
+    /// Random quorum values including 0, negative (via i128 cast) and values
+    /// above total supply. Asserts the expected error variant for each class.
+    #[test]
+    fn fuzz_create_proposal_quorum_bounds(quorum in i128::MIN..=(TOTAL_SUPPLY * 2)) {
+        let env = Env::default();
+        let (gov, proposer) = setup(&env);
+        let result = gov.try_create_proposal(
+            &proposer,
+            &String::from_str(&env, "Valid Title"),
+            &String::from_str(&env, "Valid description"),
+            &quorum,
+            &3_600u64,
+        );
+        if quorum <= 0 {
+            prop_assert!(
+                result == Err(Ok(ContractError::InvalidQuorum)),
+                "quorum={quorum} should return InvalidQuorum"
+            );
+        } else if quorum > TOTAL_SUPPLY {
+            prop_assert!(
+                result == Err(Ok(ContractError::QuorumExceedsSupply)),
+                "quorum={quorum} exceeding supply should return QuorumExceedsSupply"
+            );
+        } else {
+            prop_assert!(result.is_ok(), "valid quorum={quorum} was rejected");
+        }
+    }
+
+    /// Random durations spanning below-minimum, valid and above-maximum ranges.
+    /// Asserts `InvalidDurationRange` outside [MIN_DURATION, MAX_DURATION].
+    #[test]
+    fn fuzz_create_proposal_duration_bounds(duration in 0u64..=(MAX_DURATION + 86_400)) {
+        let env = Env::default();
+        let (gov, proposer) = setup(&env);
+        let result = gov.try_create_proposal(
+            &proposer,
+            &String::from_str(&env, "Valid Title"),
+            &String::from_str(&env, "Valid description"),
+            &1_000_000i128,
+            &duration,
+        );
+        if duration < MIN_DURATION || duration > MAX_DURATION {
+            prop_assert!(
+                result == Err(Ok(ContractError::InvalidDurationRange)),
+                "duration={duration} out of range should return InvalidDurationRange"
+            );
+        } else {
+            prop_assert!(result.is_ok(), "valid duration={duration} was rejected");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // cast_vote fuzz tests (issue #62)
 // ---------------------------------------------------------------------------
 //

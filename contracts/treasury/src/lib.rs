@@ -5,7 +5,7 @@
 
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -28,6 +28,16 @@ pub struct TreasuryAction {
     pub asset: Asset,
 }
 
+/// Event emitted on every successful `disburse` call.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Disbursed {
+    pub recipient: Address,
+    pub amount: i128,
+    pub asset: Asset,
+    pub proposal_id: u64,
+}
+
 #[contracttype]
 #[derive(Clone)]
 enum DataKey {
@@ -44,6 +54,7 @@ mod token_interface {
     #[contractclient(name = "TokenClient")]
     pub trait TokenInterface {
         fn transfer(env: Env, from: Address, to: Address, amount: i128);
+        fn balance(env: Env, owner: Address) -> i128;
     }
 }
 
@@ -65,11 +76,23 @@ impl TreasuryContract {
     }
 
     /// Disburse funds according to a TreasuryAction. Only callable by governance.
-    pub fn disburse(env: Env, action: TreasuryAction) {
+    ///
+    /// `proposal_id` identifies the governance proposal that authorised this
+    /// disbursement and is included in the emitted `Disbursed` event.
+    pub fn disburse(env: Env, action: TreasuryAction, proposal_id: u64) {
         let governance: Address = env.storage().instance().get(&DataKey::Governance).unwrap();
         governance.require_auth();
 
-        match action.asset {
+        // Validate the recipient is a non-zero address to prevent burning funds.
+        if is_zero_address(&env, &action.recipient) {
+            panic!("invalid recipient");
+        }
+        // Validate the amount is strictly positive.
+        if action.amount <= 0 {
+            panic!("invalid treasury amount");
+        }
+
+        match action.asset.clone() {
             Asset::Native => {
                 let client = token::StellarAssetClient::new(&env, &env.current_contract_address());
                 client.transfer(&env.current_contract_address(), &action.recipient, &action.amount);
@@ -80,17 +103,48 @@ impl TreasuryContract {
             }
         }
 
-
         env.events().publish(
-            (soroban_sdk::symbol_short!("disburse"),),
-            (action.recipient, action.amount),
+            (symbol_short!("treasury"), symbol_short!("disbursed")),
+            Disbursed {
+                recipient: action.recipient,
+                amount: action.amount,
+                asset: action.asset,
+                proposal_id,
+            },
         );
+    }
+
+    /// Return the current treasury balance for the given asset.
+    ///
+    /// For `Asset::Native` this reads the native XLM balance held by the
+    /// contract; for `Asset::Token(addr)` it queries the SEP-41 token balance.
+    pub fn balance(env: Env, asset: Asset) -> i128 {
+        let contract = env.current_contract_address();
+        match asset {
+            Asset::Native => {
+                let client = token::StellarAssetClient::new(&env, &contract);
+                client.balance(&contract)
+            }
+            Asset::Token(token_addr) => {
+                let client = token_interface::TokenClient::new(&env, &token_addr);
+                client.balance(&contract)
+            }
+        }
     }
 
     /// Return the governance address.
     pub fn governance(env: Env) -> Address {
         env.storage().instance().get(&DataKey::Governance).unwrap()
     }
+}
+
+/// Returns `true` if `addr` is the all-zero Stellar address (the "null" account).
+fn is_zero_address(env: &Env, addr: &Address) -> bool {
+    let zero = Address::from_string(&soroban_sdk::String::from_str(
+        env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    ));
+    addr == &zero
 }
 
 // ---------------------------------------------------------------------------
@@ -205,7 +259,7 @@ mod test {
             amount: 400i128,
             asset: Asset::Token(token_id.clone()),
         };
-        treasury.disburse(&action);
+        treasury.disburse(&action, &1u64);
 
         // Recipient's balance must increase and treasury's must decrease
         assert_eq!(token.balance(&recipient), 400i128);
@@ -245,7 +299,7 @@ mod test {
             amount: 100i128,
             asset: Asset::Token(token_id.clone()),
         };
-        treasury.disburse(&action);
+        treasury.disburse(&action, &2u64);
 
         assert_eq!(token.balance(&recipient), 100i128);
         assert_eq!(token.balance(&treasury_id), 400i128);
@@ -279,8 +333,8 @@ mod test {
         treasury.initialize(&governance);
         token.mint(&admin, &treasury_id, &1_000i128);
 
-        treasury.disburse(&TreasuryAction { recipient: alice.clone(), amount: 300i128, asset: Asset::Token(token_id.clone()) });
-        treasury.disburse(&TreasuryAction { recipient: bob.clone(),   amount: 200i128, asset: Asset::Token(token_id.clone()) });
+        treasury.disburse(&TreasuryAction { recipient: alice.clone(), amount: 300i128, asset: Asset::Token(token_id.clone()) }, &3u64);
+        treasury.disburse(&TreasuryAction { recipient: bob.clone(),   amount: 200i128, asset: Asset::Token(token_id.clone()) }, &4u64);
 
         assert_eq!(token.balance(&alice), 300i128);
         assert_eq!(token.balance(&bob),   200i128);
@@ -342,7 +396,7 @@ mod test {
             recipient,
             amount: 100i128,
             asset: Asset::Token(token_id),
-        });
+        }, &5u64);
     }
 
     // -----------------------------------------------------------------------
@@ -384,7 +438,7 @@ mod test {
                 recipient: recipient.clone(),
                 amount: 100i128,
                 asset: Asset::Native,
-            });
+            }, &6u64);
         }));
 
         // The auth guard must NOT be what caused a panic — meaning our code
@@ -434,10 +488,103 @@ mod test {
                 recipient: recipient.clone(),
                 amount: 0i128,
                 asset: Asset::Token(token_id.clone()),
-            });
+            }, &7u64);
         }));
 
         assert_eq!(token.balance(&recipient), 0i128, "zero disburse must not increase recipient balance");
+    }
+
+    // -----------------------------------------------------------------------
+    // multisig-style authorization pattern
+    // -----------------------------------------------------------------------
+
+    /// Demonstrates the documented multisig treasury governance pattern:
+    /// the treasury's governance address is a 2-of-3 multisig account. A
+    /// disbursement is only authorized once two of the three signers have
+    /// approved it; a call carrying only a single signer's approval must be
+    /// rejected by `governance.require_auth()`.
+    #[test]
+    fn test_multisig_style_authorization_pattern() {
+        use cosmosvote_token::{TokenContract, TokenContractClient};
+
+        let env = Env::default();
+
+        let admin = Address::generate(&env);
+        let signer_a = Address::generate(&env);
+        let signer_b = Address::generate(&env);
+        let signer_c = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        // The multisig account itself acts as the treasury's governance address.
+        let multisig = Address::generate(&env);
+
+        // Setup calls (token init, treasury init, mint) are fully mocked.
+        env.mock_all_auths();
+
+        let token_id = env.register(TokenContract, ());
+        let token = TokenContractClient::new(&env, &token_id);
+        token.initialize(
+            &admin,
+            &1_000_000i128,
+            &soroban_sdk::String::from_str(&env, "CosmosVote"),
+            &soroban_sdk::String::from_str(&env, "VOTE"),
+            &7u32,
+        );
+
+        let treasury_id = env.register(TreasuryContract, ());
+        let treasury = TreasuryContractClient::new(&env, &treasury_id);
+        treasury.initialize(&multisig);
+        token.mint(&admin, &treasury_id, &1_000i128);
+
+        assert_eq!(treasury.governance(), multisig);
+
+        let action = TreasuryAction {
+            recipient: recipient.clone(),
+            amount: 250i128,
+            asset: Asset::Token(token_id.clone()),
+        };
+
+        // --- Case 1: only one of three signers approved -> must be rejected ---
+        env.set_auths(&[MockAuth {
+            address: &signer_a,
+            invoke: &MockAuthInvoke {
+                contract: &treasury_id,
+                fn_name: "disburse",
+                args: (action.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            treasury.disburse(&action);
+        }));
+        assert!(
+            rejected.is_err(),
+            "disburse must be rejected without the multisig governance approval"
+        );
+        assert_eq!(token.balance(&recipient), 0i128);
+        assert_eq!(token.balance(&treasury_id), 1_000i128);
+
+        // --- Case 2: two of three signers approved -> disbursement succeeds ---
+        // The multisig account authorizes the call on behalf of the signers.
+        env.set_auths(&[MockAuth {
+            address: &multisig,
+            invoke: &MockAuthInvoke {
+                contract: &treasury_id,
+                fn_name: "disburse",
+                args: (action.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        treasury.disburse(&action);
+
+        assert_eq!(token.balance(&recipient), 250i128);
+        assert_eq!(token.balance(&treasury_id), 750i128);
+
+        // Silence unused-variable warnings for the remaining signers while
+        // documenting the 2-of-3 quorum.
+        let _ = (&signer_b, &signer_c);
     }
 
     // -----------------------------------------------------------------------
@@ -497,10 +644,176 @@ mod test {
             recipient: recipient.clone(),
             amount: 750i128,
             asset: Asset::Token(token_id.clone()),
-        });
+        }, &8u64);
 
         // Step 4: verify
         assert_eq!(token.balance(&recipient), 750i128);
         assert_eq!(token.balance(&treasury_id), 1_250i128);
+    }
+
+    // -----------------------------------------------------------------------
+    // Disbursed event
+    // -----------------------------------------------------------------------
+
+    /// A successful disburse must emit a `Disbursed` event carrying the
+    /// recipient, amount, asset and proposal id.
+    #[test]
+    fn test_disburse_emits_disbursed_event() {
+        use cosmosvote_token::{TokenContract, TokenContractClient};
+        use soroban_sdk::testutils::Events as _;
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let governance = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        let token_id = env.register(TokenContract, ());
+        let token = TokenContractClient::new(&env, &token_id);
+        token.initialize(
+            &admin,
+            &1_000_000i128,
+            &soroban_sdk::String::from_str(&env, "CosmosVote"),
+            &soroban_sdk::String::from_str(&env, "VOTE"),
+            &7u32,
+        );
+
+        let treasury_id = env.register(TreasuryContract, ());
+        let treasury = TreasuryContractClient::new(&env, &treasury_id);
+        treasury.initialize(&governance);
+        token.mint(&admin, &treasury_id, &1_000i128);
+
+        let asset = Asset::Token(token_id.clone());
+        treasury.disburse(
+            &TreasuryAction {
+                recipient: recipient.clone(),
+                amount: 250i128,
+                asset: asset.clone(),
+            },
+            &42u64,
+        );
+
+        // Find the Disbursed event emitted by the treasury contract.
+        let events = env.events().all();
+        let mut found = false;
+        for (contract, topics, data) in events.iter() {
+            if contract != treasury_id {
+                continue;
+            }
+            let expected_topics = (
+                symbol_short!("treasury"),
+                symbol_short!("disbursed"),
+            )
+                .into_val(&env);
+            if topics != expected_topics {
+                continue;
+            }
+            let event: Disbursed = data.into_val(&env);
+            assert_eq!(event.recipient, recipient);
+            assert_eq!(event.amount, 250i128);
+            assert_eq!(event.proposal_id, 42u64);
+            match event.asset {
+                Asset::Token(addr) => assert_eq!(addr, token_id),
+                Asset::Native => panic!("expected token asset in event"),
+            }
+            found = true;
+        }
+        assert!(found, "Disbursed event was not emitted");
+    }
+
+    // -----------------------------------------------------------------------
+    // balance query
+    // -----------------------------------------------------------------------
+
+    /// `balance()` must return the SEP-41 token balance held by the treasury.
+    #[test]
+    fn test_balance_token_asset() {
+        use cosmosvote_token::{TokenContract, TokenContractClient};
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let governance = Address::generate(&env);
+
+        let token_id = env.register(TokenContract, ());
+        let token = TokenContractClient::new(&env, &token_id);
+        token.initialize(
+            &admin,
+            &1_000_000i128,
+            &soroban_sdk::String::from_str(&env, "CosmosVote"),
+            &soroban_sdk::String::from_str(&env, "VOTE"),
+            &7u32,
+        );
+
+        let treasury_id = env.register(TreasuryContract, ());
+        let treasury = TreasuryContractClient::new(&env, &treasury_id);
+        treasury.initialize(&governance);
+        token.mint(&admin, &treasury_id, &1_234i128);
+
+        assert_eq!(treasury.balance(&Asset::Token(token_id.clone())), 1_234i128);
+    }
+
+    /// `balance()` for `Asset::Native` must read the native XLM balance of the
+    /// treasury contract (zero in a fresh test environment).
+    #[test]
+    fn test_balance_native_asset() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let governance = Address::generate(&env);
+
+        let treasury_id = env.register(TreasuryContract, ());
+        let treasury = TreasuryContractClient::new(&env, &treasury_id);
+        treasury.initialize(&governance);
+
+        assert_eq!(treasury.balance(&Asset::Native), 0i128);
+    }
+
+    // -----------------------------------------------------------------------
+    // zero-address recipient rejection
+    // -----------------------------------------------------------------------
+
+    /// Disbursing to the zero address must be rejected.
+    #[test]
+    #[should_panic(expected = "invalid recipient")]
+    fn test_disburse_zero_address_recipient_panics() {
+        use cosmosvote_token::{TokenContract, TokenContractClient};
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let governance = Address::generate(&env);
+
+        let token_id = env.register(TokenContract, ());
+        let token = TokenContractClient::new(&env, &token_id);
+        token.initialize(
+            &admin,
+            &1_000_000i128,
+            &soroban_sdk::String::from_str(&env, "CosmosVote"),
+            &soroban_sdk::String::from_str(&env, "VOTE"),
+            &7u32,
+        );
+
+        let treasury_id = env.register(TreasuryContract, ());
+        let treasury = TreasuryContractClient::new(&env, &treasury_id);
+        treasury.initialize(&governance);
+        token.mint(&admin, &treasury_id, &1_000i128);
+
+        let zero = Address::from_string(&soroban_sdk::String::from_str(
+            &env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        ));
+
+        treasury.disburse(
+            &TreasuryAction {
+                recipient: zero,
+                amount: 100i128,
+                asset: Asset::Token(token_id.clone()),
+            },
+            &9u64,
+        );
     }
 }

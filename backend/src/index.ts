@@ -3,32 +3,18 @@ import { initErrorTracking, flushErrorTracking } from './errorTracking';
 import { createHealthServer } from './health';
 import { NotificationService } from './notificationService';
 import { logger } from './logger';
+import { requestContext } from './requestContext';
 import helmet from 'helmet';
-import { readFileSync } from 'fs';
-import { join } from 'path';
-
-// Resolve the running version. Prefer an explicitly injected version (set by
-// the release workflow at build time), falling back to package.json.
-function resolveVersion(): string {
-  if (process.env.COSMOSVOTE_VERSION) {
-    return process.env.COSMOSVOTE_VERSION;
-  }
-  try {
-    const pkgPath = join(__dirname, '..', 'package.json');
-    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version?: string };
-    return pkg.version ?? '0.0.0';
-  } catch {
-    return '0.0.0';
-  }
-}
-
-const APP_VERSION = resolveVersion();
+import compression from 'compression';
 
 // Validate env vars before anything else — fails fast with a clear message.
 const env = loadEnv();
 
 // Must be called before any async work so unhandled rejections are captured.
 initErrorTracking();
+
+// Warn at boot if TLS certificate validation has been globally disabled.
+checkTlsEnforcement();
 
 // Initialize the append-only audit log for admin operations.
 auditLogger.init({ logPath: env.AUDIT_LOG_PATH });
@@ -52,16 +38,41 @@ const securityHeaders = helmet({
   referrerPolicy: { policy: 'strict-origin' },
 });
 
-const healthServer = createHealthServer(() => service.checkReadiness(), securityHeaders);
-
-// Expose the running version so deployments can verify what is live.
-healthServer.on('request', (req, res) => {
-  if (req.method === 'GET' && req.url === '/version') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ version: APP_VERSION }));
-  }
+// Response compression middleware. Negotiates gzip/brotli via the client's
+// Accept-Encoding header, only compresses bodies larger than 1 KB, and skips
+// already-compressed binary content types (images, zip, etc.).
+const compressionMiddleware = compression({
+  threshold: 1024,
+  filter: (req, res) => {
+    const contentType = res.getHeader('Content-Type');
+    if (typeof contentType === 'string') {
+      const type = contentType.toLowerCase();
+      const alreadyCompressed = [
+        'image/',
+        'video/',
+        'audio/',
+        'application/zip',
+        'application/gzip',
+        'application/x-gzip',
+        'application/x-compress',
+        'application/x-rar-compressed',
+        'application/x-7z-compressed',
+        'application/octet-stream',
+      ];
+      if (alreadyCompressed.some((prefix) => type.startsWith(prefix))) {
+        return false;
+      }
+    }
+    // Fall back to the default filter (respects Accept-Encoding, skips HEAD, etc.).
+    return compression.filter(req, res);
+  },
 });
 
+const healthServer = createHealthServer(
+  () => service.checkReadiness(),
+  securityHeaders,
+  compressionMiddleware,
+);
 const healthPort = env.HEALTH_PORT;
 healthServer.listen(healthPort, '0.0.0.0', () => {
   console.info(
@@ -72,11 +83,37 @@ healthServer.listen(healthPort, '0.0.0.0', () => {
 service.start();
 logger.info({ event: 'startup' }, 'notification service started');
 
+// Maximum time to wait for in-flight HTTP requests to finish before forcing
+// the process to exit. Prevents a stuck connection from blocking shutdown
+// indefinitely (e.g. during a rolling deploy or container restart).
+const SHUTDOWN_TIMEOUT_MS = Number(process.env.SHUTDOWN_TIMEOUT_MS ?? 10000);
+
+function closeServerWithTimeout(timeoutMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      logger.warn(
+        { event: 'shutdown_timeout', timeoutMs },
+        'forcing shutdown: in-flight requests did not complete in time'
+      );
+      resolve();
+    }, timeoutMs);
+
+    healthServer.close(() => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
 async function shutdown() {
   logger.info({ event: 'shutdown' }, 'notification service stopping');
   service.stop();
-  healthServer.close();
-  await auditLogger.flush();
+  await closeServerWithTimeout(SHUTDOWN_TIMEOUT_MS);
   await flushErrorTracking();
   process.exit(0);
 }

@@ -15,6 +15,7 @@ pub fn initialize(
     proposal_cooldown: u64,
     min_quorum_bps: u32,
     restrict_admin_vote: bool,
+    max_active_proposals: u32,
 ) -> Result<(), ContractError>
 ```
 
@@ -28,6 +29,7 @@ pub fn initialize(
 | `proposal_cooldown` | `u64` | Seconds a proposer must wait between proposals (`0` = no cooldown) |
 | `min_quorum_bps` | `u32` | Minimum quorum floor in basis points, e.g. `500` = 5% (`0` = no floor) |
 | `restrict_admin_vote` | `bool` | If `true`, admin cannot vote on proposals they created |
+| `max_active_proposals` | `u32` | Maximum number of simultaneously active proposals (`0` = use the default `MAX_ACTIVE_PROPOSALS` of 100) |
 
 **Returns:** `Ok(())` on success.
 
@@ -43,6 +45,7 @@ gov.initialize(
     &86_400u64,     // 1-day cooldown
     &500u32,        // 5% quorum floor
     &true,          // admin cannot vote on own proposals
+    &100u32,        // at most 100 active proposals (0 = default 100)
 );
 ```
 
@@ -103,6 +106,10 @@ pub fn create_proposal(
 | `quorum` | `i128` | `> 0`, `<= total_supply`, `>= floor` | Minimum total votes required to pass |
 | `duration` | `u64` | 60–2,592,000 seconds | Voting window length |
 
+**Quorum floor:** `quorum` must be at least `total_supply * min_quorum_bps / 10000` (integer division). A proposal whose quorum is below this floor is rejected with `QuorumBelowFloor (20)`, even if it is otherwise valid. When `min_quorum_bps = 0` no floor is enforced.
+
+**Treasury action limit:** A proposal may carry at most **10** treasury actions (`MAX_TREASURY_ACTIONS`). Attempting to create a proposal with more than 10 actions is rejected with `TooManyTreasuryActions (42)`.
+
 **Returns:** `Ok(proposal_id)` — the new proposal's `u64` ID.
 
 **Errors**
@@ -116,8 +123,11 @@ pub fn create_proposal(
 | 17 | `InvalidDurationRange` | Duration < 60 or > 2,592,000 |
 | 18 | `InsufficientBalance` | Proposer balance < `min_proposal_balance` |
 | 19 | `ProposalCooldown` | Proposer is within cooldown window |
-| 20 | `QuorumBelowFloor` | Quorum < `min_quorum_bps` floor |
+| 20 | `QuorumBelowFloor` | Quorum < `total_supply * min_quorum_bps / 10000` |
 | 40 | `ContractPaused` | Contract is paused |
+| 62 | `InvalidRecipient` | A treasury action recipient is the zero address |
+
+Treasury action recipients are validated at proposal creation time: any action whose `recipient` is the zero address is rejected with `InvalidRecipient (62)`.
 
 **Example**
 
@@ -199,7 +209,7 @@ pub fn cast_vote(
 | `proposal_id` | `u64` | Target proposal |
 | `vote` | `Vote` | `Vote::Yes`, `Vote::No`, or `Vote::Abstain` |
 
-Vote weight equals the voter's token balance at the proposal's `snapshot_ledger`. Abstain votes count toward quorum but not toward the yes/no outcome.
+Vote weight equals the voter's token balance at the proposal's `snapshot_ledger`, read via the token's `balance_at` query. Abstain votes count toward quorum but not toward the yes/no outcome.
 
 **Errors**
 
@@ -241,6 +251,27 @@ pub fn get_vote(env: Env, proposal_id: u64, voter: Address) -> Result<VoteRecord
 **Returns:** `Ok(VoteRecord { vote, weight })` for the voter's recorded vote.
 
 **Errors:** `VoteNotFound (27)` if the voter has not voted.
+
+---
+
+## `get_vote_record`
+
+```rust
+pub fn get_vote_record(env: Env, proposal_id: u64, voter: Address) -> Option<VoteRecord>
+```
+
+**Returns:** `Some(VoteRecord { vote, weight })` for the voter's recorded vote, or `None` if the voter has not voted on the proposal. Unlike `get_vote`, this query never errors on a missing record.
+
+**Authentication:** None — this is a read-only query callable without auth.
+
+**Example**
+
+```rust
+match gov.get_vote_record(&proposal_id, &voter) {
+    Some(record) => assert_eq!(record.vote, Vote::Yes),
+    None => { /* voter has not voted */ }
+}
+```
 
 ---
 
@@ -325,6 +356,43 @@ Updates the quorum on an active proposal. Only allowed before any votes are cast
 
 ---
 
+## `update_proposal_cooldown`
+
+```rust
+pub fn update_proposal_cooldown(
+    env: Env,
+    admin: Address,
+    new_cooldown: u64,
+) -> Result<(), ContractError>
+```
+
+Updates the `proposal_cooldown` (in seconds) applied between proposals per address. Admin only.
+
+**Parameters**
+
+| Name | Type | Description |
+|------|------|-------------|
+| `admin` | `Address` | Must auth; must be the current admin |
+| `new_cooldown` | `u64` | New cooldown in seconds (`0` = no cooldown) |
+
+**Returns:** `Ok(())` on success.
+
+**Events:** Emits `ProposalCooldownUpdated` with the previous and new cooldown values.
+
+**Errors**
+
+| Code | Error | Condition |
+|------|-------|-----------|
+| 30 | `NotAdmin` | Caller is not the admin |
+
+**Example**
+
+```rust
+gov.update_proposal_cooldown(&admin, &172_800u64); // 2-day cooldown
+```
+
+---
+
 ## `transfer_admin`
 
 ```rust
@@ -388,7 +456,7 @@ Read-only accessors for admin address, pending admin (if any), and contract vers
 | 17 | `InvalidDurationRange` | Duration out of 60–2,592,000 range |
 | 18 | `InsufficientBalance` | Proposer below minimum balance |
 | 19 | `ProposalCooldown` | Proposer within cooldown window |
-| 20 | `QuorumBelowFloor` | Quorum below `min_quorum_bps` floor |
+| 20 | `QuorumBelowFloor` | Quorum below `total_supply * min_quorum_bps / 10000` |
 | 21 | `VotingNotStarted` | Voting period not yet started |
 | 22 | `VotingPeriodEnded` | Voting period has ended |
 | 23 | `VotingStillOpen` | Voting period still open |
@@ -403,5 +471,10 @@ Read-only accessors for admin address, pending admin (if any), and contract vers
 | 34 | `NotPendingAdmin` | Caller is not the pending admin |
 | 40 | `ContractPaused` | Contract is paused |
 | 41 | `NotPaused` | Contract is not paused |
+| 42 | `ProposalsStillActive` | Active proposal limit reached |
+| 43 | `TooFewChoices` | Fewer than 2 choices supplied |
+| 44 | `TooManyChoices` | More than 10 choices supplied |
+| 45 | `InvalidChoiceLength` | Choice string empty or > 64 chars |
 | 50 | `ArithmeticOverflow` | Integer overflow |
 | 61 | `MaxVotersReached` | Proposal has reached the `MAX_VOTER_COUNT` (10 000) unique voter limit |
+| 62 | `InvalidRecipient` | Treasury action recipient is the zero address |

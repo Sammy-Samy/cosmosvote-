@@ -18,6 +18,14 @@
 **Mitigations:** Admin can only cancel/execute — cannot alter votes or tallies. Admin vote restriction option. Events make all admin actions auditable.  
 **Residual Risk:** Medium (by design — admin is a trusted role; use multisig in production)
 
+### T3a — Malicious Treasury Signer / Governance Key Holder
+**Goal:** Drain or redirect treasury funds by abusing the governance address that the treasury contract authorizes for disbursements.  
+**Mitigations:** The treasury contract authorizes only the governance contract address, so every disbursement must flow through governance. In production the governance address is controlled by a 2-of-3 multisig (see `docs/admin-multisig-pattern.md`), which adds the following protections:
+- **No single-key disbursement:** A single compromised or malicious signer cannot authorize a disbursement; at least two independent signers must approve.
+- **Veto over disbursements:** Any one of the three signers can refuse to sign, blocking a disbursement that governance has approved. This gives each signer a unilateral veto on treasury outflows, so a governance proposal that passes on-chain still requires multisig co-signing before funds move.
+- **Auditability:** Every multisig approval is an on-chain transaction, so disbursement approvals are traceable to individual signers.
+**Residual Risk:** Medium. Two colluding signers (or two compromised signer keys) can approve any disbursement the governance contract authorizes, and a single compromised signer can block all disbursements (liveness veto). Mitigate by using independent key custody (separate hardware wallets, distinct operators), rotating signers, and monitoring for repeated vetoes or unusual approval patterns. A 3-of-5 or higher threshold reduces collusion risk at the cost of liveness.
+
 ### T4 — External Attacker (No Tokens)
 **Goal:** Disrupt governance without holding tokens.  
 **Mitigations:** `require_auth()` on all state-changing ops, initialization guard, state machine checks.  
@@ -54,4 +62,6 @@ For local Docker development, the repository uses a proxy service so the fronten
 | Arithmetic safety | `checked_add` on all vote accumulation |
 | Finalization correctness | Pass condition evaluated atomically |
 | Emergency response | Admin pause blocks all state-changing ops |
+| Treasury disbursement control | Treasury authorizes only the governance address; production governance is a 2-of-3 multisig requiring two approvals per disbursement |
+| Treasury veto | Any single multisig signer can withhold approval and block a disbursement (liveness veto) |
 .

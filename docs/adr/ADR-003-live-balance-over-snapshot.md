@@ -1,6 +1,6 @@
 # ADR-003: Snapshot Voting with Balance at Proposal Creation
 
-**Status:** Accepted  
+**Status:** Accepted (Implemented)  
 **Date:** 2026-05-17  
 <!-- . -->
 **Revised:** 2026-05-29
@@ -15,7 +15,7 @@ The original decision (ADR-003 v1) was to use live balance for simplicity. Howev
 
 ## Decision
 
-Use snapshot voting: capture the current ledger sequence number at proposal creation time, and fetch voting power using `balance_at(owner, snapshot_ledger)` at vote time. The snapshot is immutable after proposal creation.
+Use snapshot voting: `create_proposal` sets `snapshot_ledger = env.ledger().sequence()` at proposal creation time, and `cast_vote` fetches voting power using `token.balance_at(voter, proposal.snapshot_ledger)`. The snapshot is immutable after proposal creation. Live balance is no longer read at vote time.
 
 ## Rationale
 
@@ -41,11 +41,11 @@ Use snapshot voting: capture the current ledger sequence number at proposal crea
 
 ## Migration Path
 
-Existing systems using ADR-003 v1 (live balance) should:
-1. Update governance contract to store snapshot_ledger at proposal creation
-2. Update cast_vote to use balance_at(voter, proposal.snapshot_ledger)
-3. Verify token contract has BalanceSnapshot storage (already present)
-4. Add tests demonstrating attack vectors and their mitigation
+The migration from ADR-003 v1 (live balance) is complete:
+1. Governance contract stores `snapshot_ledger = env.ledger().sequence()` at proposal creation
+2. `cast_vote` uses `token.balance_at(voter, proposal.snapshot_ledger)`
+3. Token contract has BalanceSnapshot storage (already present)
+4. Tests mint tokens before proposal creation and demonstrate attack vectors and their mitigation
 
 ## References
 

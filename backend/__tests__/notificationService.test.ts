@@ -4,6 +4,7 @@
  */
 
 import axios from 'axios';
+import { createHmac } from 'crypto';
 import { NotificationService, WebhookPayload } from '../src/notificationService';
 
 jest.mock('axios');
@@ -118,6 +119,44 @@ describe('deliverWebhook', () => {
     );
   });
 
+  it('sends an HMAC-SHA256 signature header over the raw JSON body', async () => {
+    mockedAxios.post.mockResolvedValueOnce({ status: 200 });
+
+    const secret = 'test-webhook-secret';
+    const svc = new NotificationService({ ...BASE_CONFIG, webhookSecret: secret });
+    const event = makeEvent();
+    await svc.deliverWebhook(event);
+
+    expect(mockedAxios.post).toHaveBeenCalledTimes(1);
+    const [url, body, config] = mockedAxios.post.mock.calls[0];
+    expect(url).toBe(BASE_CONFIG.webhookUrl);
+
+    // Body must be the raw JSON string so recipients can verify it byte-for-byte.
+    expect(typeof body).toBe('string');
+    const rawBody = body as string;
+    expect(JSON.parse(rawBody)).toEqual(event);
+
+    const expectedSignature = createHmac('sha256', secret).update(rawBody).digest('hex');
+    expect(config).toEqual(
+      expect.objectContaining({
+        timeout: 5_000,
+        headers: expect.objectContaining({ 'X-CosmosVote-Signature': expectedSignature }),
+      })
+    );
+  });
+
+  it('omits the signature header when no webhook secret is configured', async () => {
+    mockedAxios.post.mockResolvedValueOnce({ status: 200 });
+
+    const svc = new NotificationService(BASE_CONFIG);
+    await svc.deliverWebhook(makeEvent());
+
+    const [, body, config] = mockedAxios.post.mock.calls[0];
+    expect(typeof body).toBe('string');
+    const headers = (config as { headers?: Record<string, string> }).headers ?? {};
+    expect(headers['X-CosmosVote-Signature']).toBeUndefined();
+  });
+
   it('does not throw when webhook delivery fails', async () => {
     mockedAxios.post.mockRejectedValue({ response: { status: 503 }, message: 'webhook unavailable' });
     jest.useFakeTimers();
@@ -160,6 +199,81 @@ describe('deliverWebhook', () => {
     await expect(delivery).resolves.toBeUndefined();
     expect(mockedAxios.post).toHaveBeenCalledTimes(4);
     jest.useRealTimers();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TLS certificate validation
+// ---------------------------------------------------------------------------
+
+describe('TLS certificate validation', () => {
+  it('rejects a webhook served with a self-signed certificate', async () => {
+    // A self-signed cert/key pair generated for tests only.
+    const selfSignedCert = [
+      '-----BEGIN CERTIFICATE-----',
+      'MIIBhTCCASugAwIBAgIQIRi6zePL6mKjOipn+dNuaTAKBggqhkjOPQQDAjASMRAw',
+      'DgYDVQQKEwdBY21lIENvMB4XDTE3MTAyMDE5NDMwNloXDTE4MTAyMDE5NDMwNlow',
+      'EjEQMA4GA1UEChMHQWNtZSBDbzBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABD0d',
+      '7VNhbWvZLWPuj/RtHFjvtJBEwOkhbN/BnnE8rnZR8+sbwnc/KhCk3FhnpHZnQz7B',
+      '5aETbbIgmuvewdjvSBSjYzBhMA4GA1UdDwEB/wQEAwICpDATBgNVHSUEDDAKBggr',
+      'BgEFBQcDATAPBgNVHRMBAf8EBTADAQH/MCkGA1UdEQQiMCCCDmxvY2FsaG9zdDo1',
+      'NDU1gg5sb2NhbGhvc3Q6NTQ1NTAdBgNVHQ4EFgQU9nQ0k1Jv1Fh0Y0k1Jv1Fh0Y0',
+      'k1IwCgYIKoZIzj0EAwIDSAAwRQIhAP0Z0s0Z0s0Z0s0Z0s0Z0s0Z0s0Z0s0Z0s0Z',
+      '0s0Z0s0Z0s0Z0s0Z0s0Z0s0Z0s0Z0s0Z0s0Z0s0Z0s0Z0s0Z0s0Z0s0Z0s0Z',
+      '-----END CERTIFICATE-----',
+    ].join('\n');
+
+    // Simulate the TLS handshake failure Node raises for an untrusted cert.
+    const certError = Object.assign(
+      new Error('self signed certificate'),
+      { code: 'DEPTH_ZERO_SELF_SIGNED_CERT' }
+    );
+    mockedAxios.post.mockRejectedValue(certError);
+    jest.useFakeTimers();
+
+    const svc = new NotificationService(BASE_CONFIG);
+    const delivery = svc.deliverWebhook(makeEvent());
+
+    await jest.advanceTimersByTimeAsync(7_000);
+    await expect(delivery).resolves.toBeUndefined();
+
+    // Every attempt must have been made with certificate validation enabled.
+    expect(mockedAxios.post).toHaveBeenCalled();
+    for (const call of mockedAxios.post.mock.calls) {
+      const config = call[2] as Record<string, unknown> | undefined;
+      expect(config).toBeDefined();
+      const httpsAgent = config?.httpsAgent as https.Agent | undefined;
+      expect(httpsAgent).toBeInstanceOf(https.Agent);
+      expect(httpsAgent?.options.rejectUnauthorized).toBe(true);
+    }
+
+    const failureLog = (console.error as jest.Mock).mock.calls
+      .map(([message]) => message)
+      .find((message) => typeof message === 'string' && message.includes('permanently failed'));
+    expect(failureLog).toContain('self signed certificate');
+    expect(selfSignedCert).toContain('BEGIN CERTIFICATE');
+    jest.useRealTimers();
+  });
+
+  it('warns at startup when NODE_TLS_REJECT_UNAUTHORIZED is disabled', () => {
+    const original = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      new NotificationService(BASE_CONFIG);
+
+      const warning = warnSpy.mock.calls
+        .map(([message]) => message)
+        .find((message) => typeof message === 'string' && message.includes('NODE_TLS_REJECT_UNAUTHORIZED'));
+      expect(warning).toBeDefined();
+    } finally {
+      if (original === undefined) {
+        delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+      } else {
+        process.env.NODE_TLS_REJECT_UNAUTHORIZED = original;
+      }
+    }
   });
 });
 

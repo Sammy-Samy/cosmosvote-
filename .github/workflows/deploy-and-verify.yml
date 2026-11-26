@@ -39,6 +39,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
+      - name: Validate .env.example (pre-flight)
+        run: bash scripts/check_env_example.sh
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v4
         with:
@@ -176,7 +179,7 @@ jobs:
 
       - name: Upload rollback log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rollback-log-${{ github.run_number }}
           path: /tmp/rollback_output.txt

@@ -197,6 +197,8 @@ non-delegated comparison table.
 - Stellar CLI (optional, for deployment)
 - Docker & Docker Compose (optional).
 
+> 📖 **Platform-specific setup:** see [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) for step-by-step instructions on **macOS**, **Linux**, and **Windows/WSL2**, including per-platform prerequisites, known issues, and workarounds (e.g. Homebrew Rust version mismatches, WSL2 Docker networking).
+
 ### Supported Versions
 
 | Component | Supported versions | Notes |
@@ -205,6 +207,8 @@ non-delegated comparison table.
 | Node.js | 20 (LTS), 22 (current LTS) | For frontend build |
 
 Matrix build status is tracked in the [Matrix Tests workflow](.github/workflows/matrix.yml).
+
+For platform-specific version requirements and known-issue workarounds, see [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md).
 
 ### 1. Clone & Configure
 
@@ -377,11 +381,21 @@ pub fn create_proposal(
     proposer: Address,
     title: String,        // 1–128 chars
     description: String,  // 1–1024 chars
-    quorum: i128,         // > 0, <= total supply
+    quorum: i128,         // >= quorum floor, <= total supply
     duration: u64,        // 60–2,592,000 seconds
     payload: Option<ExecutionPayload>, // Optional on-chain action
 ) -> Result<u64, ContractError>
 ```
+
+**Quorum floor:** the `quorum` value must be at least
+`total_supply * min_quorum_bps / 10000` (the floor configured at
+`initialize`). A proposal requesting a lower quorum is rejected with
+`ContractError::QuorumBelowFloor`.
+
+**Treasury action limit:** a proposal may carry at most **10** treasury
+actions (`MAX_TREASURY_ACTIONS = 10`). Exceeding this limit returns
+`ContractError::TooManyTreasuryActions`. This bounds ledger storage and
+execution cost per proposal.
 
 ### Cast Vote
 
@@ -402,6 +416,9 @@ pub fn finalise(env: Env, proposal_id: u64) -> Result<(), ContractError>
 
 Pass conditions: `total_votes >= quorum AND votes_yes > votes_no`
 
+Vote weight is snapshot-based: each voter's weight is their token balance
+at the time they cast their vote.
+
 The `finalise()` function is permissionless and is intended to be called by an off-chain keeper or bot after the voting period ends. This ensures proposals do not stay stuck in `Active` state even if no single voter submits the finalization transaction.
 
 ### Execute / Cancel
@@ -410,6 +427,30 @@ The `finalise()` function is permissionless and is intended to be called by an o
 pub fn execute(env: Env, admin: Address, proposal_id: u64) -> Result<(), ContractError>
 pub fn cancel(env: Env, admin: Address, proposal_id: u64, reason: Option<String>) -> Result<(), ContractError>
 ```
+
+### Query Functions
+
+```rust
+// Returns the current ProposalCount (monotonic proposal ID counter) from instance storage.
+// Use this to enumerate proposal IDs (IDs are 1..=proposal_count) without reading raw storage keys.
+pub fn proposal_count(env: Env) -> u64
+
+// Returns all current governance parameters in a single call.
+pub fn get_config(env: Env) -> GovernanceConfig
+```
+
+`GovernanceConfig` exposes the current governance parameters:
+
+```rust
+pub struct GovernanceConfig {
+    pub min_proposal_balance: i128, // Minimum token balance required to create a proposal
+    pub proposal_cooldown: u64,     // Seconds between proposals per proposer
+    pub restrict_admin_vote: bool,  // Admin vote restriction flag
+    pub min_quorum_bps: u32,        // Minimum quorum in basis points
+}
+```
+
+Both functions are read-only and require no authorization, making them safe to call from off-chain tooling and indexers.
 
 ### Admin Operations
 
@@ -642,6 +683,18 @@ The Dockerfile uses a **multi-stage build** to keep the final image small and fr
 | `runtime` | `debian:bookworm-slim` (pinned to digest) | Ships only `*.wasm` artifacts + Stellar CLI |
 
 Both base images are pinned to a specific digest for reproducible builds.
+
+**Platform support:** Published Docker images are multi-architecture and support both `linux/amd64` and `linux/arm64`, so Apple Silicon (M-series) machines run the image natively without emulation. The CI pipeline builds and tests both architectures and pushes a multi-arch manifest to the container registry.
+
+**Build a multi-arch image locally** (requires Docker Buildx; use `--push` or `--load` to store the result):
+
+```bash
+# Build for both architectures and push a multi-arch manifest
+docker buildx build --platform linux/amd64,linux/arm64 --target runtime -t cosmosvote:latest --push .
+
+# Build for a single architecture and load it into the local Docker daemon
+docker buildx build --platform linux/arm64 --target runtime -t cosmosvote:latest --load .
+```
 
 **Build the runtime image** (WASM artifacts only):
 

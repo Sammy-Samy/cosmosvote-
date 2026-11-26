@@ -10,8 +10,14 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   RUST_VERSION: "1.78.0"
+  NODE_VERSION: "20"
 
+# Required status checks (configure these as branch protection rules for main/develop):
+#   - "Secrets Scan" (secret-scan)  — gitleaks over full git history; violations block merge (#488)
+#   - "Env Example Check" (env-check) — validates .env.example documentation; failures block merge (#489)
 jobs:
+  # Issue #488: block PRs that commit secrets. fetch-depth: 0 scans the full git
+  # history on first run; false positives are suppressed via .gitleaks.toml.
   secret-scan:
     name: Secrets Scan
     runs-on: ubuntu-latest
@@ -20,10 +26,19 @@ jobs:
         with:
           fetch-depth: 0
       - name: Run gitleaks
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_CONFIG: .gitleaks.toml
+
+  # Issue #489: fail the build when .env.example contains undocumented variables.
+  env-check:
+    name: Env Example Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Validate .env.example documentation
+        run: bash scripts/check_env_example.sh
 
   fmt:
     name: Formatting
@@ -63,6 +78,29 @@ jobs:
         run: cargo test --all --features testutils
       - name: Run property-based tests
         run: cargo test prop_ --all --features testutils
+
+  error-snapshot:
+    name: ContractError Snapshot Gate
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Verify ContractError discriminants match snapshot
+        # Error code integers are part of the public API. This gate fails if any
+        # ContractError variant is added, removed, or renumbered without updating
+        # the snapshot in test_snapshots/ (see CONTRIBUTING.md for how to update).
+        run: |
+          set -euo pipefail
+          SNAPSHOT_DIR="test_snapshots"
+          if [ ! -d "$SNAPSHOT_DIR" ]; then
+            echo "Error: $SNAPSHOT_DIR directory not found"
+            exit 1
+          fi
+          cargo test error_snapshot --all --features testutils -- --nocapture
 
   error-coverage:
     name: ContractError Coverage Gate
@@ -115,8 +153,66 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Run instruction count benchmarks
-        run: cargo test bench_ --features testutils -- --nocapture
+      - name: Run instruction count benchmarks (wasm32 target)
+        run: |
+          set -euo pipefail
+          cargo test bench_ --features testutils --target wasm32-unknown-unknown -- --nocapture \
+            | tee benchmark_output.txt
+      - name: Enforce per-function instruction count baseline (10% gate)
+        run: |
+          set -euo pipefail
+          BASELINE_FILE="wasm_size_baseline.txt"
+          if [ ! -f "$BASELINE_FILE" ]; then
+            echo "Error: $BASELINE_FILE not found"
+            exit 1
+          fi
+          if [ ! -f benchmark_output.txt ]; then
+            echo "Error: benchmark_output.txt not found; benchmarks did not run"
+            exit 1
+          fi
+          # Baseline lines use the format: BENCH <function> <instructions>
+          declare -A baseline
+          while read -r tag func instructions _; do
+            if [ "$tag" = "BENCH" ] && [ -n "${func:-}" ] && [ -n "${instructions:-}" ]; then
+              baseline["$func"]="$instructions"
+            fi
+          done < "$BASELINE_FILE"
+          if [ "${#baseline[@]}" -eq 0 ]; then
+            echo "Error: no per-function baselines found in $BASELINE_FILE"
+            exit 1
+          fi
+          declare -A measured
+          while read -r tag func instructions _; do
+            if [ "$tag" = "BENCH" ] && [ -n "${func:-}" ] && [ -n "${instructions:-}" ]; then
+              measured["$func"]="$instructions"
+            fi
+          done < benchmark_output.txt
+          if [ "${#measured[@]}" -eq 0 ]; then
+            echo "Error: no BENCH results captured from benchmark run"
+            exit 1
+          fi
+          failed=0
+          for func in "${!baseline[@]}"; do
+            base="${baseline[$func]}"
+            if [ -z "${measured[$func]:-}" ]; then
+              echo "Error: no benchmark result for $func (baseline: $base instructions)"
+              failed=1
+              continue
+            fi
+            actual="${measured[$func]}"
+            limit=$(( base + base / 10 ))
+            if [ "$actual" -gt "$limit" ]; then
+              echo "Regression: $func used $actual instructions, baseline $base (limit $limit, >10% over)"
+              failed=1
+            else
+              echo "OK: $func used $actual instructions (baseline $base, limit $limit)"
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "Error: one or more functions exceeded their instruction count baseline by more than 10%"
+            exit 1
+          fi
+          echo "All benchmarked functions are within 10% of their baselines."
 
   build:
     name: Build WASM
@@ -145,6 +241,51 @@ jobs:
               exit 1
             fi
           done
+      - name: Check WASM size regression against baseline
+        # Mandatory gate: fails if any built WASM exceeds its recorded baseline in
+        # wasm_size_baseline.txt by more than 5%. Updating the baseline requires
+        # explicit PR approval (see docs/wasm-size-budget.md).
+        run: |
+          set -euo pipefail
+          BASELINE_FILE="wasm_size_baseline.txt"
+          if [ ! -f "$BASELINE_FILE" ]; then
+            echo "Error: $BASELINE_FILE not found"
+            exit 1
+          fi
+          echo "=== WASM size regression check (baseline: $BASELINE_FILE) ==="
+          failed=0
+          while IFS= read -r line; do
+            # Skip blank lines and comments.
+            line="$(echo "$line" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+            [ -z "$line" ] && continue
+            case "$line" in \#*) continue ;; esac
+            # Expected format: <wasm-name-or-path> <baseline-bytes>
+            name="$(echo "$line" | awk '{print $1}')"
+            baseline="$(echo "$line" | awk '{print $2}')"
+            if ! echo "$baseline" | grep -qE '^[0-9]+$'; then
+              echo "Error: invalid baseline entry in $BASELINE_FILE: '$line'"
+              exit 1
+            fi
+            wasm_file="$(find target/wasm32-unknown-unknown/release -name "*.wasm" -path "*${name}*" | head -n1)"
+            if [ -z "$wasm_file" ]; then
+              echo "Error: no built WASM binary found matching '$name'"
+              failed=1
+              continue
+            fi
+            size=$(stat -c%s "$wasm_file")
+            limit=$(( baseline + (baseline * 5 / 100) ))
+            if [ "$size" -gt "$limit" ]; then
+              echo "Error: $wasm_file is $size bytes, exceeds baseline $baseline by >5% (limit $limit)"
+              failed=1
+            else
+              echo "OK: $wasm_file is $size bytes (baseline $baseline, limit $limit)"
+            fi
+          done < "$BASELINE_FILE"
+          if [ "$failed" -ne 0 ]; then
+            echo "Error: WASM size regression detected. Baseline updates require explicit PR approval."
+            exit 1
+          fi
+          echo "All WASM binaries are within the 5% size budget."
       - name: Upload WASM artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -152,11 +293,34 @@ jobs:
           path: target/wasm32-unknown-unknown/release/*.wasm
           retention-days: 7
 
+  backend-node:
+    name: Backend Node Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Verify Node version matches engines constraint
+        run: |
+          set -euo pipefail
+          node --version
+          node -e "const r=require('./package.json').engines.node;const s=require('semver');if(!s.satisfies(process.version,r)){console.error('Node '+process.version+' does not satisfy engines.node '+r);process.exit(1)}"
+      - name: Install backend dependencies
+        run: npm ci
+      - name: Type-check backend
+        run: npm run typecheck --if-present
+      - name: Test backend
+        run: npm test --if-present
+
   deployment-tooling:
     name: Deployment Tooling Checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
       - name: Lint shell scripts
         run: |
           find scripts/ -name '*.sh' | xargs -I{} bash -n {}
@@ -164,6 +328,125 @@ jobs:
         run: docker compose version || (sudo apt-get update && sudo apt-get install -y docker-compose-plugin)
       - name: Validate Docker Compose config
         run: docker compose config --quiet
+      - name: Reject disabled TLS verification (NODE_TLS_REJECT_UNAUTHORIZED)
+        run: |
+          set -euo pipefail
+          # Setting NODE_TLS_REJECT_UNAUTHORIZED=0 disables TLS certificate
+          # validation for all outgoing Node.js requests (including webhooks).
+          # It must never be baked into images or compose files.
+          files=("Dockerfile" "backend/Dockerfile" "docker-compose.yml")
+          found=0
+          for f in "${files[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "Skipping $f (not present)"
+              continue
+            fi
+            if grep -nE 'NODE_TLS_REJECT_UNAUTHORIZED' "$f"; then
+              echo "Error: $f sets NODE_TLS_REJECT_UNAUTHORIZED, which disables TLS certificate validation."
+              found=1
+            fi
+          done
+          if [ "$found" -ne 0 ]; then
+            exit 1
+          fi
+          echo "No NODE_TLS_REJECT_UNAUTHORIZED overrides found."
+
+  # ─── Multi-architecture Docker image ───────────────────────────────────────
+  # Builds the image for linux/amd64 and linux/arm64 (Apple Silicon) and pushes
+  # a single multi-arch manifest to the container registry.
+  docker-build:
+    name: Docker Build (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    needs: [fmt, lint, test]
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf # v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@988b5a0280414f15e6da17513954e9926061b244 # v3
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build image for ${{ matrix.platform }}
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: false
+          load: false
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+
+  docker-manifest:
+    name: Docker Multi-Arch Manifest
+    runs-on: ubuntu-latest
+    needs: docker-build
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf # v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@988b5a0280414f15e6da17513954e9926061b244 # v3
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-
+      - name: Build and push multi-arch manifest
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=linux/amd64
+          cache-to: type=gha,mode=max,scope=multi-arch
+      - name: Inspect multi-arch manifest
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${{ github.repository }}:sha-${GITHUB_SHA:0:7}"
+          docker buildx imagetools inspect "$IMAGE"
+          platforms=$(docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest}}' \
+            | grep -o '"platform":{[^}]*}' | grep -o '"architecture":"[^"]*"' | sort -u)
+          echo "Manifest architectures:"
+          echo "$platforms"
+          for arch in amd64 arm64; do
+            if ! echo "$platforms" | grep -q "\"$arch\""; then
+              echo "Error: multi-arch manifest is missing linux/$arch"
+              exit 1
+            fi
+          done
+          echo "Multi-arch manifest contains linux/amd64 and linux/arm64."
 
   license-check:
     name: License Compliance
@@ -182,13 +465,33 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "20"
+          node-version: ${{ env.NODE_VERSION }}
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm ci
       - name: Check frontend dependency licenses
         working-directory: frontend
+        # license-checker exits non-zero when an unapproved license is found,
+        # which fails the job.
         run: npm run license-check
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+      - name: Check backend dependency licenses
+        working-directory: backend
+        # license-checker exits non-zero when an unapproved license is found,
+        # which fails the job.
+        run: npm run license-check
+      - name: Upload license reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: license-reports
+          path: |
+            frontend/license-report.json
+            backend/license-report.json
+          if-no-files-found: warn
+          retention-days: 7
 
   coverage:
     name: Contract Coverage
@@ -222,6 +525,26 @@ jobs:
       - name: Run actionlint
         run: actionlint -color
 
+  frontend-i18n:
+    name: Frontend i18n Lint & Locale Sync
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Lint for hardcoded strings (i18next/no-literal-string)
+        run: npm run lint:i18n
+      - name: Verify locale files are in sync
+        run: npm run check:i18n
+
   frontend-coverage:
     name: Frontend Coverage
     runs-on: ubuntu-latest
@@ -233,7 +556,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '20'
+          node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
       - name: Install dependencies
@@ -249,15 +572,22 @@ jobs:
     name: Notify on Failure
     runs-on: ubuntu-latest
     needs:
+      - secret-scan
+      - env-check
       - fmt
       - lint
       - test
+      - error-snapshot
       - benchmark
       - build
+      - backend-node
       - deployment-tooling
+      - docker-build
+      - docker-manifest
       - license-check
       - coverage
       - actionlint
+      - frontend-i18n
       - frontend-coverage
     if: ${{ always() && github.event_name == 'push' && contains(fromJson('["main", "develop"]'), github.ref_name) }}
     env:
@@ -268,15 +598,22 @@ jobs:
         run: |
           FAILED_JOBS=""
           for job_result in \
+            "Secrets Scan:${{ needs.secret-scan.result }}" \
+            "Env Example Check:${{ needs.env-check.result }}" \
             "Formatting:${{ needs.fmt.result }}" \
             "Clippy:${{ needs.lint.result }}" \
             "Tests:${{ needs.test.result }}" \
+            "ContractError Snapshot Gate:${{ needs.error-snapshot.result }}" \
             "Instruction Count Benchmarks:${{ needs.benchmark.result }}" \
             "Build WASM:${{ needs.build.result }}" \
+            "Backend Node Checks:${{ needs.backend-node.result }}" \
             "Deployment Tooling Checks:${{ needs.deployment-tooling.result }}" \
+            "Docker Build:${{ needs.docker-build.result }}" \
+            "Docker Multi-Arch Manifest:${{ needs.docker-manifest.result }}" \
             "License Compliance:${{ needs.license-check.result }}" \
             "Contract Coverage:${{ needs.coverage.result }}" \
             "Lint GitHub Actions:${{ needs.actionlint.result }}" \
+            "Frontend i18n Lint & Locale Sync:${{ needs.frontend-i18n.result }}" \
             "Frontend Coverage:${{ needs.frontend-coverage.result }}"; do
             name="${job_result%%:*}"
             result="${job_result##*:}"
