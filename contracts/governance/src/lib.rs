@@ -1088,6 +1088,27 @@ impl GovernanceContract {
         Ok(())
     }
 
+    /// Update the minimum token balance required to create proposals. Admin only.
+    ///
+    /// Alias of [`set_min_proposal_balance`](Self::set_min_proposal_balance)
+    /// exposed under the name specified by issue #459. Emits
+    /// `MinProposalBalanceUpdated`.
+    pub fn update_min_proposal_balance(
+        env: Env,
+        admin: Address,
+        new_balance: i128,
+    ) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin)?;
+        if new_balance < 0 {
+            return Err(ContractError::InsufficientBalance);
+        }
+        let old_balance = GovernanceStorage::min_proposal_balance(&env);
+        GovernanceStorage::set_min_proposal_balance(&env, new_balance);
+        GovernanceEvents::min_proposal_balance_updated(&env, &admin, old_balance, new_balance);
+        Ok(())
+    }
+
     /// Update the per-proposer cooldown in seconds. Admin only.
     pub fn set_proposal_cooldown(
         env: Env,
@@ -1188,6 +1209,73 @@ impl GovernanceContract {
             return Err(ContractError::InvalidRecipient);
         }
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for update_min_proposal_balance (issue #459)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod update_min_proposal_balance_tests {
+    use super::*;
+    use soroban_sdk::testutils::Address as _;
+
+    fn setup(env: &Env) -> (Address, Address) {
+        let admin = Address::generate(env);
+        let token = Address::generate(env);
+        GovernanceContract::initialize(
+            env.clone(),
+            admin.clone(),
+            token,
+            100,
+            0,
+            0,
+            false,
+            None,
+            0,
+        )
+        .unwrap();
+        (admin, Address::generate(env))
+    }
+
+    #[test]
+    fn update_min_proposal_balance_happy_path() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _) = setup(&env);
+
+        assert_eq!(GovernanceStorage::min_proposal_balance(&env), 100);
+
+        GovernanceContract::update_min_proposal_balance(env.clone(), admin.clone(), 500).unwrap();
+        assert_eq!(GovernanceStorage::min_proposal_balance(&env), 500);
+
+        // Lowering the threshold is also allowed.
+        GovernanceContract::update_min_proposal_balance(env.clone(), admin, 0).unwrap();
+        assert_eq!(GovernanceStorage::min_proposal_balance(&env), 0);
+    }
+
+    #[test]
+    fn update_min_proposal_balance_rejects_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (_, non_admin) = setup(&env);
+
+        let result = GovernanceContract::update_min_proposal_balance(env.clone(), non_admin, 500);
+        assert_eq!(result, Err(ContractError::NotAdmin));
+        // Value must be unchanged.
+        assert_eq!(GovernanceStorage::min_proposal_balance(&env), 100);
+    }
+
+    #[test]
+    fn update_min_proposal_balance_rejects_negative() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _) = setup(&env);
+
+        let result = GovernanceContract::update_min_proposal_balance(env.clone(), admin, -1);
+        assert_eq!(result, Err(ContractError::InsufficientBalance));
+        assert_eq!(GovernanceStorage::min_proposal_balance(&env), 100);
     }
 }
 

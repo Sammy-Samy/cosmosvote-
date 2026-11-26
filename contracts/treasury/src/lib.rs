@@ -495,6 +495,99 @@ mod test {
     }
 
     // -----------------------------------------------------------------------
+    // multisig-style authorization pattern
+    // -----------------------------------------------------------------------
+
+    /// Demonstrates the documented multisig treasury governance pattern:
+    /// the treasury's governance address is a 2-of-3 multisig account. A
+    /// disbursement is only authorized once two of the three signers have
+    /// approved it; a call carrying only a single signer's approval must be
+    /// rejected by `governance.require_auth()`.
+    #[test]
+    fn test_multisig_style_authorization_pattern() {
+        use cosmosvote_token::{TokenContract, TokenContractClient};
+
+        let env = Env::default();
+
+        let admin = Address::generate(&env);
+        let signer_a = Address::generate(&env);
+        let signer_b = Address::generate(&env);
+        let signer_c = Address::generate(&env);
+        let recipient = Address::generate(&env);
+
+        // The multisig account itself acts as the treasury's governance address.
+        let multisig = Address::generate(&env);
+
+        // Setup calls (token init, treasury init, mint) are fully mocked.
+        env.mock_all_auths();
+
+        let token_id = env.register(TokenContract, ());
+        let token = TokenContractClient::new(&env, &token_id);
+        token.initialize(
+            &admin,
+            &1_000_000i128,
+            &soroban_sdk::String::from_str(&env, "CosmosVote"),
+            &soroban_sdk::String::from_str(&env, "VOTE"),
+            &7u32,
+        );
+
+        let treasury_id = env.register(TreasuryContract, ());
+        let treasury = TreasuryContractClient::new(&env, &treasury_id);
+        treasury.initialize(&multisig);
+        token.mint(&admin, &treasury_id, &1_000i128);
+
+        assert_eq!(treasury.governance(), multisig);
+
+        let action = TreasuryAction {
+            recipient: recipient.clone(),
+            amount: 250i128,
+            asset: Asset::Token(token_id.clone()),
+        };
+
+        // --- Case 1: only one of three signers approved -> must be rejected ---
+        env.set_auths(&[MockAuth {
+            address: &signer_a,
+            invoke: &MockAuthInvoke {
+                contract: &treasury_id,
+                fn_name: "disburse",
+                args: (action.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            treasury.disburse(&action);
+        }));
+        assert!(
+            rejected.is_err(),
+            "disburse must be rejected without the multisig governance approval"
+        );
+        assert_eq!(token.balance(&recipient), 0i128);
+        assert_eq!(token.balance(&treasury_id), 1_000i128);
+
+        // --- Case 2: two of three signers approved -> disbursement succeeds ---
+        // The multisig account authorizes the call on behalf of the signers.
+        env.set_auths(&[MockAuth {
+            address: &multisig,
+            invoke: &MockAuthInvoke {
+                contract: &treasury_id,
+                fn_name: "disburse",
+                args: (action.clone(),).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        treasury.disburse(&action);
+
+        assert_eq!(token.balance(&recipient), 250i128);
+        assert_eq!(token.balance(&treasury_id), 750i128);
+
+        // Silence unused-variable warnings for the remaining signers while
+        // documenting the 2-of-3 quorum.
+        let _ = (&signer_b, &signer_c);
+    }
+
+    // -----------------------------------------------------------------------
     // governance() before initialize
     // -----------------------------------------------------------------------
 

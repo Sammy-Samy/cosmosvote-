@@ -337,6 +337,27 @@ updated stuff
 - Test both success and failure paths for every public function
 - **Coverage Target:** All contributions must maintain at least **80% code coverage**. The CI will fail if coverage drops below this threshold.
 
+### Error code snapshots
+
+Error code integers are part of the public API — clients rely on them to interpret failures. To prevent accidental renumbering, the mapping from every `ContractError` variant to its `u32` discriminant is pinned in a snapshot file:
+
+```
+contracts/governance/test_snapshots/error_codes.snap
+```
+
+- The snapshot lists every `ContractError` variant and its `u32` discriminant.
+- CI runs the snapshot test and **fails if any discriminant changes** or a variant is added/removed without updating the snapshot.
+- If you intentionally add, remove, or renumber an error code, regenerate the snapshot and commit it alongside your change:
+
+  ```bash
+  cargo test -p governance error_codes_snapshot
+  # or, to update all snapshots:
+  UPDATE_SNAPSHOTS=1 cargo test -p governance
+  ```
+
+- Review the snapshot diff carefully before committing — an unintended change means a client could silently interpret the wrong error.
+- Never edit `error_codes.snap` by hand; always regenerate it from `types.rs`.
+
 ## Security
 
 If you discover a security vulnerability, **do not open a public issue**. See [SECURITY.md](./SECURITY.md) for responsible disclosure.
